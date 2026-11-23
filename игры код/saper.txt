@@ -1,0 +1,196 @@
+local COLS, ROWS, MINES = 20, 15, 40
+
+local numColors = {
+  colors.blue, colors.green, colors.red, colors.purple,
+  colors.brown, colors.cyan, colors.black, colors.gray
+}
+
+local mine, open, flag, count
+local opened, flags, started, over, won, seconds, timer
+
+local function reset()
+  mine, open, flag, count = {}, {}, {}, {}
+  for r = 1, ROWS do
+    mine[r], open[r], flag[r], count[r] = {}, {}, {}, {}
+    for c = 1, COLS do
+      mine[r][c], open[r][c], flag[r][c], count[r][c] = false, false, false, 0
+    end
+  end
+  opened, flags, seconds = 0, 0, 0
+  started, over, won, timer = false, false, false, nil
+end
+
+local function neighbors(r, c)
+  local list = {}
+  for dr = -1, 1 do
+    for dc = -1, 1 do
+      local nr, nc = r + dr, c + dc
+      if (dr ~= 0 or dc ~= 0) and nr >= 1 and nr <= ROWS and nc >= 1 and nc <= COLS then
+        list[#list + 1] = {nr, nc}
+      end
+    end
+  end
+  return list
+end
+
+local function placeMines(sr, sc)
+  math.randomseed(os.epoch("utc"))
+  local placed = 0
+  while placed < MINES do
+    local r, c = math.random(ROWS), math.random(COLS)
+    if not mine[r][c] and not (math.abs(r - sr) <= 1 and math.abs(c - sc) <= 1) then
+      mine[r][c] = true
+      placed = placed + 1
+    end
+  end
+  for r = 1, ROWS do
+    for c = 1, COLS do
+      local n = 0
+      for _, p in ipairs(neighbors(r, c)) do
+        if mine[p[1]][p[2]] then n = n + 1 end
+      end
+      count[r][c] = n
+    end
+  end
+end
+
+local function drawCell(r, c)
+  local x, y = (c - 1) * 2 + 1, r + 1
+  term.setCursorPos(x, y)
+  if open[r][c] then
+    if mine[r][c] then
+      term.setBackgroundColor(colors.red)
+      term.setTextColor(colors.black)
+      write("* ")
+    else
+      term.setBackgroundColor(colors.gray)
+      local n = count[r][c]
+      if n > 0 then
+        term.setTextColor(n == 7 and colors.white or numColors[n])
+        write(n .. " ")
+      else
+        write("  ")
+      end
+    end
+  elseif flag[r][c] then
+    term.setBackgroundColor(colors.lightGray)
+    term.setTextColor(colors.red)
+    write("F ")
+  else
+    term.setBackgroundColor(colors.lightGray)
+    write("  ")
+  end
+end
+
+local function drawHeader()
+  term.setBackgroundColor(colors.black)
+  term.setTextColor(colors.yellow)
+  term.setCursorPos(1, 1)
+  term.clearLine()
+  write("Mines: " .. (MINES - flags) .. "  Time: " .. seconds .. "  R-new Q-quit")
+end
+
+local function drawAll()
+  term.setBackgroundColor(colors.black)
+  term.clear()
+  drawHeader()
+  for r = 1, ROWS do
+    for c = 1, COLS do drawCell(r, c) end
+  end
+end
+
+local function message(text, color)
+  term.setBackgroundColor(colors.black)
+  term.setTextColor(color)
+  term.setCursorPos(1, ROWS + 3)
+  term.clearLine()
+  write(text)
+end
+
+local function floodOpen(r, c)
+  local stack = {{r, c}}
+  while #stack > 0 do
+    local p = table.remove(stack)
+    local pr, pc = p[1], p[2]
+    if not open[pr][pc] and not flag[pr][pc] then
+      open[pr][pc] = true
+      opened = opened + 1
+      drawCell(pr, pc)
+      if count[pr][pc] == 0 then
+        for _, n in ipairs(neighbors(pr, pc)) do
+          if not open[n[1]][n[2]] then stack[#stack + 1] = n end
+        end
+      end
+    end
+  end
+end
+
+local function lose()
+  over = true
+  for r = 1, ROWS do
+    for c = 1, COLS do
+      if mine[r][c] then open[r][c] = true end
+    end
+  end
+  drawAll()
+  message("BOOM! Game over. R - new game", colors.red)
+end
+
+local function checkWin()
+  if opened == ROWS * COLS - MINES then
+    over, won = true, true
+    message("You win in " .. seconds .. " s! R - new game", colors.lime)
+  end
+end
+
+local function click(button, x, y)
+  local c, r = math.floor((x - 1) / 2) + 1, y - 1
+  if r < 1 or r > ROWS or c < 1 or c > COLS then return end
+
+  if button == 1 then
+    if flag[r][c] or open[r][c] then return end
+    if not started then
+      started = true
+      placeMines(r, c)
+      timer = os.startTimer(1)
+    end
+    if mine[r][c] then
+      open[r][c] = true
+      lose()
+      return
+    end
+    floodOpen(r, c)
+    checkWin()
+  elseif button == 2 then
+    if open[r][c] then return end
+    flag[r][c] = not flag[r][c]
+    flags = flags + (flag[r][c] and 1 or -1)
+    drawCell(r, c)
+    drawHeader()
+  end
+end
+
+reset()
+drawAll()
+
+while true do
+  local e, a, b, c = os.pullEvent()
+  if e == "mouse_click" and not over then
+    click(a, b, c)
+    drawHeader()
+  elseif e == "timer" and a == timer then
+    if started and not over then
+      seconds = seconds + 1
+      drawHeader()
+      timer = os.startTimer(1)
+    end
+  elseif e == "key" then
+    if a == keys.q then break end
+    if a == keys.r then reset() drawAll() end
+  end
+end
+
+term.setBackgroundColor(colors.black)
+term.setTextColor(colors.white)
+term.clear()
+term.setCursorPos(1, 1)

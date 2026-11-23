@@ -1,0 +1,383 @@
+local w, h = term.getSize()
+local cwd = ""                 -- текущая папка ("" = корень)
+local items, sel, top = {}, 1, 1
+local clip = nil               -- буфер: {path = ..., cut = true/false}
+local searchMode = false
+local msg, mcol = "", colors.lightGray
+
+local function fmtSize(n)
+  if n < 1024 then return n .. " B"
+  elseif n < 1048576 then return string.format("%.1f KB", n / 1024)
+  else return string.format("%.1f MB", n / 1048576) end
+end
+
+local function dirSize(path)
+  local total = 0
+  for _, f in ipairs(fs.list(path)) do
+    local p = fs.combine(path, f)
+    if fs.isDir(p) then total = total + dirSize(p) else total = total + fs.getSize(p) end
+  end
+  return total
+end
+
+local function sortList(list)
+  table.sort(list, function(a, b)
+    if a.isDir ~= b.isDir then return a.isDir end
+    return a.name:lower() < b.name:lower()
+  end)
+end
+
+local function scan()
+  local list = {}
+  if cwd ~= "" then
+    list[1] = {name = "..", path = fs.getDir(cwd), isDir = true, up = true}
+  end
+  local rest = {}
+  for _, f in ipairs(fs.list(cwd)) do
+    local p = fs.combine(cwd, f)
+    rest[#rest + 1] = {
+      name = f, path = p, isDir = fs.isDir(p),
+      size = fs.isDir(p) and 0 or fs.getSize(p),
+      ro = fs.isReadOnly(p),
+    }
+  end
+  sortList(rest)
+  for _, it in ipairs(rest) do list[#list + 1] = it end
+  return list
+end
+
+local function refresh(keep)
+  searchMode = false
+  items = scan()
+  sel = 1
+  if keep then
+    for i, it in ipairs(items) do
+      if it.name == keep then sel = i break end
+    end
+  end
+end
+
+local function say(text, color)
+  msg, mcol = text, color or colors.lightGray
+end
+
+local function draw()
+  term.setBackgroundColor(colors.black)
+  term.clear()
+
+  term.setTextColor(colors.yellow)
+  term.setCursorPos(1, 1)
+  if searchMode then
+    write(("Search results in /" .. cwd):sub(1, w))
+  else
+    write(("/" .. cwd):sub(1, w))
+  end
+
+  term.setTextColor(colors.gray)
+  term.setCursorPos(1, 2)
+  local free = fs.getFreeSpace(cwd == "" and "/" or cwd)
+  write(#items .. " items   free: " .. fmtSize(free))
+  if clip then
+    write("   clip: " .. (clip.cut and "cut " or "copy ") .. fs.getName(clip.path))
+  end
+
+  local rows = h - 5
+  if sel < top then top = sel end
+  if sel > top + rows - 1 then top = sel - rows + 1 end
+  if top < 1 then top = 1 end
+
+  for i = 0, rows - 1 do
+    local it = items[top + i]
+    if it then
+      local on = (top + i == sel)
+      term.setCursorPos(1, 3 + i)
+      term.setBackgroundColor(on and colors.white or colors.black)
+      term.clearLine()
+      local c
+      if it.isDir then c = colors.yellow
+      elseif it.ro then c = colors.lightBlue
+      elseif it.name:match("%.lua$") then c = colors.lime
+      else c = colors.white end
+      if on then c = colors.black end
+      term.setTextColor(c)
+      local name = it.name .. (it.isDir and "/" or "")
+      write(" " .. name:sub(1, w - 13))
+      local sz = it.isDir and "<dir>" or fmtSize(it.size)
+      term.setTextColor(on and colors.gray or colors.lightGray)
+      term.setCursorPos(w - #sz, 3 + i)
+      write(sz)
+    end
+  end
+
+  term.setBackgroundColor(colors.black)
+  term.setTextColor(mcol)
+  term.setCursorPos(1, h - 2)
+  write(msg:sub(1, w))
+  term.setTextColor(colors.gray)
+  term.setCursorPos(1, h - 1)
+  write("Enter open  C copy  X cut  V paste  D del")
+  term.setCursorPos(1, h)
+  write("R ren N file F dir G run I size S find Q quit")
+end
+
+local function prompt(text, default)
+  term.setBackgroundColor(colors.black)
+  term.setTextColor(colors.yellow)
+  term.setCursorPos(1, h - 2)
+  term.clearLine()
+  write(text)
+  term.setTextColor(colors.white)
+  local s = read(nil, nil, nil, default)
+  return s
+end
+
+local function confirm(text)
+  term.setBackgroundColor(colors.black)
+  term.setTextColor(colors.red)
+  term.setCursorPos(1, h - 2)
+  term.clearLine()
+  write(text .. " Y/N")
+  while true do
+    local _, k = os.pullEvent("key")
+    if k == keys.y then return true end
+    if k == keys.n or k == keys.enter or k == keys.backspace then return false end
+  end
+end
+
+local function validName(n)
+  return n and n ~= "" and not n:find("[/\\]") and n ~= "." and n ~= ".."
+end
+
+local function unique(dir, name)
+  if not fs.exists(fs.combine(dir, name)) then return name end
+  local base, ext = name:match("^(.*)(%.[^.]+)$")
+  if not base then base, ext = name, "" end
+  local n = 1
+  while true do
+    local cand = base .. "_copy" .. (n > 1 and n or "") .. ext
+    if not fs.exists(fs.combine(dir, cand)) then return cand end
+    n = n + 1
+  end
+end
+
+local function pause()
+  term.setTextColor(colors.lightGray)
+  print()
+  print("Press any key...")
+  os.pullEvent("key")
+end
+
+local function cleanScreen()
+  term.setBackgroundColor(colors.black)
+  term.setTextColor(colors.white)
+  term.clear()
+  term.setCursorPos(1, 1)
+end
+
+local function openItem(it)
+  if searchMode then
+    cwd = fs.getDir(it.path)
+    refresh(fs.getName(it.path))
+    say("")
+    return
+  end
+  if it.isDir then
+    local from = cwd
+    cwd = it.path
+    refresh(it.up and fs.getName(from) or nil)
+    say("")
+  else
+    cleanScreen()
+    shell.run("edit", it.path)
+    refresh(it.name)
+  end
+end
+
+local function goUp()
+  if cwd ~= "" then
+    local from = fs.getName(cwd)
+    cwd = fs.getDir(cwd)
+    refresh(from)
+    say("")
+  end
+end
+
+local function doDelete(it)
+  if it.up then return end
+  if it.ro then say("Read-only, can't delete", colors.red) return end
+  if confirm("Delete " .. it.name .. "?") then
+    local ok, err = pcall(fs.delete, it.path)
+    if ok then say("Deleted " .. fs.getName(it.path), colors.lime)
+    else say(tostring(err), colors.red) end
+    refresh()
+  else
+    say("")
+  end
+end
+
+local function doRename(it)
+  if it.up then return end
+  if it.ro then say("Read-only, can't rename", colors.red) return end
+  local n = prompt("New name: ", fs.getName(it.path))
+  if not validName(n) or n == fs.getName(it.path) then say("") return end
+  local dest = fs.combine(fs.getDir(it.path), n)
+  if fs.exists(dest) then say("Name already exists", colors.red) return end
+  local ok, err = pcall(fs.move, it.path, dest)
+  if ok then
+    say("Renamed", colors.lime)
+    cwd = fs.getDir(dest)
+    refresh(n)
+  else
+    say(tostring(err), colors.red)
+  end
+end
+
+local function doPaste()
+  if not clip then say("Clipboard is empty", colors.orange) return end
+  if not fs.exists(clip.path) then
+    say("Source no longer exists", colors.red)
+    clip = nil
+    return
+  end
+  local name = fs.getName(clip.path)
+  local dest = fs.combine(cwd, name)
+  if fs.isDir(clip.path) and (dest == clip.path or dest:sub(1, #clip.path + 1) == clip.path .. "/") then
+    say("Can't put a folder inside itself", colors.red)
+    return
+  end
+  if clip.cut then
+    if dest == clip.path then say("Already here", colors.orange) return end
+    if fs.exists(dest) then name = unique(cwd, name) dest = fs.combine(cwd, name) end
+    local ok, err = pcall(fs.move, clip.path, dest)
+    if ok then say("Moved " .. name, colors.lime) clip = nil
+    else say(tostring(err), colors.red) end
+  else
+    if fs.exists(dest) then name = unique(cwd, name) dest = fs.combine(cwd, name) end
+    local ok, err = pcall(fs.copy, clip.path, dest)
+    if ok then say("Copied as " .. name, colors.lime)
+    else say(tostring(err), colors.red) end
+  end
+  refresh(name)
+end
+
+local function doNewFile()
+  local n = prompt("New file name: ")
+  if not validName(n) then say("") return end
+  local p = fs.combine(cwd, n)
+  if fs.exists(p) then say("Name already exists", colors.red) return end
+  local ok, err = pcall(function()
+    local f = fs.open(p, "w")
+    f.close()
+  end)
+  if not ok then say(tostring(err), colors.red) return end
+  refresh(n)
+  cleanScreen()
+  shell.run("edit", p)
+  refresh(n)
+  say("")
+end
+
+local function doNewFolder()
+  local n = prompt("New folder name: ")
+  if not validName(n) then say("") return end
+  local p = fs.combine(cwd, n)
+  if fs.exists(p) then say("Name already exists", colors.red) return end
+  local ok, err = pcall(fs.makeDir, p)
+  if ok then say("Folder created", colors.lime) refresh(n)
+  else say(tostring(err), colors.red) end
+end
+
+local function doRun(it)
+  if it.isDir then return end
+  cleanScreen()
+  local ok = shell.run(it.path)
+  if not ok then
+    term.setTextColor(colors.red)
+    print()
+    print("Program stopped with an error.")
+  end
+  pause()
+  refresh(fs.getName(it.path))
+  say("")
+end
+
+local function doInfo(it)
+  if it.up then return end
+  if it.isDir then
+    say(fs.getName(it.path) .. ": " .. fmtSize(dirSize(it.path)), colors.cyan)
+  else
+    say(fs.getName(it.path) .. ": " .. fmtSize(it.size) .. (it.ro and " (read-only)" or ""), colors.cyan)
+  end
+end
+
+-- поиск
+local function searchIn(query, dir, out)
+  for _, f in ipairs(fs.list(dir)) do
+    local p = fs.combine(dir, f)
+    if f:lower():find(query, 1, true) and #out < 300 then
+      out[#out + 1] = {
+        name = p, path = p, isDir = fs.isDir(p),
+        size = fs.isDir(p) and 0 or fs.getSize(p),
+        ro = fs.isReadOnly(p),
+      }
+    end
+    if fs.isDir(p) and p ~= "rom" then searchIn(query, p, out) end
+  end
+end
+
+local function doSearch()
+  local q = prompt("Search: ")
+  if not q or q == "" then say("") return end
+  local res = {}
+  searchIn(q:lower(), cwd, res)
+  if #res == 0 then say("Nothing found", colors.orange) return end
+  sortList(res)
+  items, sel, top = res, 1, 1
+  searchMode = true
+  say("Found " .. #res .. ". Enter - go to, Backspace - back", colors.lime)
+end
+
+refresh()
+while true do
+  draw()
+  local e, a, b, c = os.pullEvent()
+  local it = items[sel]
+  if e == "key" then
+    if a == keys.up and sel > 1 then sel = sel - 1
+    elseif a == keys.down and sel < #items then sel = sel + 1
+    elseif a == keys.pageUp then sel = math.max(1, sel - (h - 6))
+    elseif a == keys.pageDown then sel = math.min(#items, sel + (h - 6))
+    elseif a == keys.home then sel = 1
+    elseif a == keys["end"] then sel = math.max(1, #items)
+    elseif a == keys.enter and it then openItem(it)
+    elseif a == keys.backspace then
+      if searchMode then refresh() say("") else goUp() end
+    elseif a == keys.delete and it then doDelete(it) end
+  elseif e == "char" then
+    local ch = a:lower()
+    if ch == "q" then break
+    elseif ch == "c" and it and not it.up then
+      clip = {path = it.path, cut = false}
+      say("Copied: " .. fs.getName(it.path), colors.lime)
+    elseif ch == "x" and it and not it.up then
+      if it.ro then say("Read-only, can't cut", colors.red)
+      else clip = {path = it.path, cut = true} say("Cut: " .. fs.getName(it.path), colors.orange) end
+    elseif ch == "v" then doPaste()
+    elseif ch == "d" and it then doDelete(it)
+    elseif ch == "r" and it then doRename(it)
+    elseif ch == "n" then doNewFile()
+    elseif ch == "f" then doNewFolder()
+    elseif ch == "g" and it then doRun(it)
+    elseif ch == "i" and it then doInfo(it)
+    elseif ch == "s" or ch == "/" then doSearch() end
+  elseif e == "mouse_click" and a == 1 then
+    local idx = top + (c - 3)
+    if c >= 3 and c <= h - 3 and items[idx] then
+      if idx == sel then openItem(items[idx]) else sel = idx end
+    end
+  elseif e == "mouse_scroll" then
+    sel = math.max(1, math.min(math.max(1, #items), sel + a))
+  end
+end
+
+cleanScreen()

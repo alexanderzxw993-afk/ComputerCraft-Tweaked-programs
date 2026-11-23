@@ -1,0 +1,146 @@
+local CFG = "clock.cfg"
+local cfg = {offset = 3}   -- часовой пояс, по умолчанию МСК (UTC+3)
+
+local MOON = {"Full moon", "Waning gibbous", "Last quarter", "Waning crescent",
+              "New moon", "Waxing crescent", "First quarter", "Waxing gibbous"}
+local WDAY = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"}
+
+local mon = peripheral.find("monitor")
+local out = mon or term.current()
+local W, H = out.getSize()
+
+local function loadCfg()
+  if fs.exists(CFG) then
+    local f = fs.open(CFG, "r")
+    local t = textutils.unserialize(f.readAll() or "")
+    f.close()
+    if type(t) == "table" and tonumber(t.offset) then cfg.offset = tonumber(t.offset) end
+  end
+end
+
+local function saveCfg()
+  local f = fs.open(CFG, "w")
+  f.write(textutils.serialize(cfg))
+  f.close()
+end
+
+-- подбираем самый крупный масштаб текста, при котором всё помещается
+local function fit()
+  if mon then
+    for _, s in ipairs({5, 4, 3, 2, 1.5, 1, 0.5}) do
+      mon.setTextScale(s)
+      W, H = mon.getSize()
+      if W >= 24 and H >= 9 then break end
+    end
+  end
+  W, H = out.getSize()
+  out.setBackgroundColor(colors.black)
+  out.clear()
+end
+
+local function line(y, text, color)
+  if y < 1 or y > H then return end
+  text = text:sub(1, W)
+  local pad = math.floor((W - #text) / 2)
+  out.setCursorPos(1, y)
+  out.setBackgroundColor(colors.black)
+  if out.isColor() then out.setTextColor(color or colors.white) end
+  out.write(string.rep(" ", pad) .. text .. string.rep(" ", W - pad - #text))
+end
+
+local function zoneName()
+  if cfg.offset == 3 then return "MSK UTC+3" end
+  local o = math.abs(cfg.offset)
+  local hh = math.floor(o)
+  local mm = math.floor((o - hh) * 60)
+  local sign = cfg.offset < 0 and "-" or "+"
+  return "UTC" .. sign .. hh .. (mm > 0 and string.format(":%02d", mm) or "")
+end
+
+local function draw()
+  -- игровое время (os.time() даёт часы 0-24 дробным числом)
+  local t = os.time()
+  local gh = math.floor(t)
+  local gm = math.floor((t - gh) * 60)
+  local day = os.day()
+  local isNight = (t >= 18.5 or t < 5.5)
+
+  -- до смены дня/ночи (1 игровой час = 50 реальных секунд)
+  local target = isNight and 5.5 or 18.5
+  local secs = math.floor(((target - t) % 24) * 50)
+  local countdown = string.format("%s in %d:%02d",
+    isNight and "Morning" or "Night", math.floor(secs / 60), secs % 60)
+
+  -- реальное время
+  local sec = math.floor(os.epoch("utc") / 1000 + cfg.offset * 3600)
+  local d = os.date("!*t", sec)
+
+  local y = math.max(1, math.floor((H - 9) / 2) + 1)
+  line(y,     "MINECRAFT", colors.yellow)
+  line(y + 1, string.format("%02d:%02d", gh, gm), isNight and colors.lightBlue or colors.orange)
+  line(y + 2, "Day " .. day, colors.white)
+  line(y + 3, "Moon: " .. MOON[((day - 1) % 8) + 1], colors.lightGray)
+  line(y + 4, countdown, isNight and colors.purple or colors.cyan)
+  line(y + 5, "", colors.black)
+  line(y + 6, "REAL " .. zoneName(), colors.yellow)
+  line(y + 7, string.format("%02d:%02d:%02d", d.hour, d.min, d.sec), colors.lime)
+  line(y + 8, string.format("%s %02d.%02d.%d", WDAY[d.wday], d.day, d.month, d.year), colors.lightGray)
+
+  if not mon then
+    line(H, "arrows=UTC m=MSK q=quit", colors.gray)
+  end
+end
+
+local function printHelp()
+  if not mon then return end
+  term.setBackgroundColor(colors.black)
+  term.setTextColor(colors.white)
+  term.clear()
+  term.setCursorPos(1, 1)
+  print("Clock is running on the monitor")
+  print("Timezone: " .. zoneName())
+  print()
+  print("Left/Right  -/+ 1 hour")
+  print("Down/Up     -/+ 30 minutes")
+  print("M           back to MSK (UTC+3)")
+  print("Q           quit")
+end
+
+loadCfg()
+fit()
+printHelp()
+draw()
+
+local timer = os.startTimer(0.5)
+while true do
+  local e, a = os.pullEvent()
+  if e == "timer" and a == timer then
+    draw()
+    timer = os.startTimer(0.5)
+  elseif e == "monitor_resize" then
+    fit()
+    draw()
+  elseif e == "key" then
+    local changed = true
+    if a == keys.right then cfg.offset = cfg.offset + 1
+    elseif a == keys.left then cfg.offset = cfg.offset - 1
+    elseif a == keys.up then cfg.offset = cfg.offset + 0.5
+    elseif a == keys.down then cfg.offset = cfg.offset - 0.5
+    elseif a == keys.m then cfg.offset = 3
+    elseif a == keys.q then break
+    else changed = false end
+    if changed then
+      cfg.offset = math.max(-12, math.min(14, cfg.offset))
+      saveCfg()
+      printHelp()
+      draw()
+    end
+  end
+end
+
+out.setBackgroundColor(colors.black)
+out.clear()
+term.setBackgroundColor(colors.black)
+term.setTextColor(colors.white)
+term.clear()
+term.setCursorPos(1, 1)

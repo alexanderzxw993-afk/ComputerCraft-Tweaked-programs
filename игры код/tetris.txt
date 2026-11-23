@@ -1,0 +1,285 @@
+local w, h = term.getSize()
+local COLS = 10
+local ROWS = math.min(20, h - 1)
+local OX = 3                      -- x-координата начала поля
+local PX = OX + COLS * 2 + 3      -- x панели справа
+local recordFile = "tetris.record"
+
+-- фигуры: n - размер квадрата вращения, клетки (x, y) с нуля
+local shapes = {
+  {n = 4, color = colors.cyan,   cells = {{0,1},{1,1},{2,1},{3,1}}},  -- I
+  {n = 2, color = colors.yellow, cells = {{0,0},{1,0},{0,1},{1,1}}},  -- O
+  {n = 3, color = colors.purple, cells = {{1,0},{0,1},{1,1},{2,1}}},  -- T
+  {n = 3, color = colors.lime,   cells = {{1,0},{2,0},{0,1},{1,1}}},  -- S
+  {n = 3, color = colors.red,    cells = {{0,0},{1,0},{1,1},{2,1}}},  -- Z
+  {n = 3, color = colors.blue,   cells = {{0,0},{0,1},{1,1},{2,1}}},  -- J
+  {n = 3, color = colors.orange, cells = {{2,0},{0,1},{1,1},{2,1}}},  -- L
+}
+
+local grid, cur, nextShape
+local score, lines, level
+local record = 0
+
+local function loadRecord()
+  if fs.exists(recordFile) then
+    local f = fs.open(recordFile, "r")
+    local n = tonumber(f.readAll())
+    f.close()
+    return n or 0
+  end
+  return 0
+end
+
+local function saveRecord(n)
+  local f = fs.open(recordFile, "w")
+  f.write(tostring(n))
+  f.close()
+end
+
+local function newPiece(shape)
+  local cells = {}
+  for i, c in ipairs(shape.cells) do cells[i] = {c[1], c[2]} end
+  return {
+    cells = cells, n = shape.n, color = shape.color,
+    x = math.floor((COLS - shape.n) / 2) + 1, y = 1,
+  }
+end
+
+local function randomShape()
+  return shapes[math.random(#shapes)]
+end
+
+local function fits(cells, px, py)
+  for _, c in ipairs(cells) do
+    local x, y = px + c[1], py + c[2]
+    if x < 1 or x > COLS or y < 1 or y > ROWS then return false end
+    if grid[y][x] ~= 0 then return false end
+  end
+  return true
+end
+
+local function rotated(p)
+  local out = {}
+  for i, c in ipairs(p.cells) do
+    out[i] = {p.n - 1 - c[2], c[1]}
+  end
+  return out
+end
+
+-- отрисовка
+local function drawBorder()
+  term.setBackgroundColor(colors.gray)
+  for r = 1, ROWS + 1 do
+    term.setCursorPos(1, r) write("  ")
+    term.setCursorPos(OX + COLS * 2, r) write("  ")
+  end
+  term.setCursorPos(1, ROWS + 1)
+  write(string.rep(" ", OX + COLS * 2 + 1))
+  term.setBackgroundColor(colors.black)
+end
+
+local function drawCell(c, r, color)
+  term.setCursorPos(OX + (c - 1) * 2, r)
+  term.setBackgroundColor(color)
+  write("  ")
+end
+
+local function drawBoard()
+  for r = 1, ROWS do
+    for c = 1, COLS do
+      drawCell(c, r, grid[r][c] ~= 0 and grid[r][c] or colors.black)
+    end
+  end
+  if cur then
+    for _, c in ipairs(cur.cells) do
+      drawCell(cur.x + c[1], cur.y + c[2], cur.color)
+    end
+  end
+  term.setBackgroundColor(colors.black)
+end
+
+local function drawPanel()
+  term.setBackgroundColor(colors.black)
+  term.setTextColor(colors.yellow)
+  term.setCursorPos(PX, 2)  write("SCORE")
+  term.setTextColor(colors.white)
+  term.setCursorPos(PX, 3)  write(string.format("%-8d", score))
+  term.setTextColor(colors.orange)
+  term.setCursorPos(PX, 4)  write("RECORD")
+  term.setTextColor(colors.white)
+  term.setCursorPos(PX, 5)  write(string.format("%-8d", math.max(record, score)))
+  term.setTextColor(colors.lime)
+  term.setCursorPos(PX, 6)  write("LEVEL " .. level .. " ")
+  term.setTextColor(colors.lightBlue)
+  term.setCursorPos(PX, 7)  write("LINES " .. lines .. " ")
+
+  term.setTextColor(colors.yellow)
+  term.setCursorPos(PX, 9)  write("NEXT")
+  term.setBackgroundColor(colors.black)
+  for r = 10, 13 do
+    term.setCursorPos(PX, r) write(string.rep(" ", 10))
+  end
+  for _, c in ipairs(nextShape.cells) do
+    term.setCursorPos(PX + c[1] * 2, 10 + c[2])
+    term.setBackgroundColor(nextShape.color)
+    write("  ")
+  end
+  term.setBackgroundColor(colors.black)
+  term.setTextColor(colors.gray)
+  if h >= 19 then
+    term.setCursorPos(PX, 15) write("Arrows move")
+    term.setCursorPos(PX, 16) write("Up rotate")
+    term.setCursorPos(PX, 17) write("Space drop")
+    term.setCursorPos(PX, 18) write("P pause Q quit")
+  end
+end
+
+local function redraw()
+  drawBoard()
+  drawPanel()
+end
+
+local function clearLines()
+  local cleared = 0
+  local r = ROWS
+  while r >= 1 do
+    local full = true
+    for c = 1, COLS do
+      if grid[r][c] == 0 then full = false break end
+    end
+    if full then
+      table.remove(grid, r)
+      local row = {}
+      for c = 1, COLS do row[c] = 0 end
+      table.insert(grid, 1, row)
+      cleared = cleared + 1
+    else
+      r = r - 1
+    end
+  end
+  if cleared > 0 then
+    local pts = {100, 300, 500, 800}
+    score = score + pts[cleared] * level
+    lines = lines + cleared
+    level = math.floor(lines / 10) + 1
+  end
+end
+
+-- возвращает false, если игра окончена
+local function lockPiece()
+  for _, c in ipairs(cur.cells) do
+    grid[cur.y + c[2]][cur.x + c[1]] = cur.color
+  end
+  clearLines()
+  cur = newPiece(nextShape)
+  nextShape = randomShape()
+  return fits(cur.cells, cur.x, cur.y)
+end
+
+local function interval()
+  return math.max(0.08, 0.6 - (level - 1) * 0.05)
+end
+
+local function play()
+  grid = {}
+  for r = 1, ROWS do
+    grid[r] = {}
+    for c = 1, COLS do grid[r][c] = 0 end
+  end
+  score, lines, level = 0, 0, 1
+  record = loadRecord()
+  cur = newPiece(randomShape())
+  nextShape = randomShape()
+
+  term.setBackgroundColor(colors.black)
+  term.clear()
+  drawBorder()
+  redraw()
+
+  local timer = os.startTimer(interval())
+  local paused = false
+  local alive = true
+
+  while alive do
+    local e, a = os.pullEvent()
+    if e == "key" then
+      if a == keys.q then return false end
+      if a == keys.p then
+        paused = not paused
+        if paused then
+          term.setBackgroundColor(colors.black)
+          term.setTextColor(colors.white)
+          term.setCursorPos(OX + 6, math.floor(ROWS / 2))
+          write("PAUSED")
+        else
+          timer = os.startTimer(interval())
+          redraw()
+        end
+      elseif not paused then
+        if a == keys.left and fits(cur.cells, cur.x - 1, cur.y) then
+          cur.x = cur.x - 1
+        elseif a == keys.right and fits(cur.cells, cur.x + 1, cur.y) then
+          cur.x = cur.x + 1
+        elseif a == keys.up then
+          local rc = rotated(cur)
+          -- пробуем без сдвига, затем со сдвигом на 1 и 2 клетки (отскок от стен)
+          for _, dx in ipairs({0, -1, 1, -2, 2}) do
+            if fits(rc, cur.x + dx, cur.y) then
+              cur.cells = rc
+              cur.x = cur.x + dx
+              break
+            end
+          end
+        elseif a == keys.down then
+          if fits(cur.cells, cur.x, cur.y + 1) then
+            cur.y = cur.y + 1
+            score = score + 1
+          end
+        elseif a == keys.space then
+          while fits(cur.cells, cur.x, cur.y + 1) do
+            cur.y = cur.y + 1
+            score = score + 2
+          end
+          alive = lockPiece()
+          timer = os.startTimer(interval())
+        end
+        redraw()
+      end
+    elseif e == "timer" and a == timer and not paused then
+      if fits(cur.cells, cur.x, cur.y + 1) then
+        cur.y = cur.y + 1
+      else
+        alive = lockPiece()
+      end
+      redraw()
+      timer = os.startTimer(interval())
+    end
+  end
+
+  -- конец игры
+  local newRecord = score > record
+  if newRecord then saveRecord(score) end
+  term.setBackgroundColor(colors.black)
+  term.setTextColor(colors.red)
+  term.setCursorPos(OX + 3, math.floor(ROWS / 2) - 1)
+  write(" GAME OVER ")
+  term.setTextColor(newRecord and colors.yellow or colors.white)
+  term.setCursorPos(OX + 2, math.floor(ROWS / 2) + 1)
+  write(newRecord and "NEW RECORD: " .. score or "Score: " .. score)
+  term.setTextColor(colors.lightGray)
+  term.setCursorPos(OX + 1, math.floor(ROWS / 2) + 3)
+  write("ENTER - again, Q - quit")
+  while true do
+    local _, k = os.pullEvent("key")
+    if k == keys.enter then return true end
+    if k == keys.q then return false end
+  end
+end
+
+math.randomseed(os.epoch("utc"))
+while play() do end
+
+term.setBackgroundColor(colors.black)
+term.setTextColor(colors.white)
+term.clear()
+term.setCursorPos(1, 1)

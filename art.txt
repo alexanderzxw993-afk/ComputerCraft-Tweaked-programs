@@ -1,0 +1,374 @@
+local W, H = term.getSize()
+local TOP = 3
+local CW, CH = W, H - TOP
+local HEX = "0123456789abcdef"
+local DARK = {["7"]=true, a=true, b=true, c=true, d=true, e=true, f=true}
+local DIR = "pictures"
+
+local grid, undo = {}, {}
+local cur, tool, size = "e", "pen", 1
+local modified, msg = false, ""
+local drag
+
+-- монитор (необязательный)
+local mon = peripheral.find("monitor")
+local MW, MH, MX, MY = 0, 0, 0, 0
+
+local function fitMon()
+  if not mon then return end
+  for _, s in ipairs({5, 4, 3, 2, 1.5, 1, 0.5}) do
+    mon.setTextScale(s)
+    MW, MH = mon.getSize()
+    if MW >= CW and MH >= CH then break end
+  end
+  MX = math.max(0, math.floor((MW - CW) / 2))
+  MY = math.max(0, math.floor((MH - CH) / 2))
+  mon.setBackgroundColor(colors.black)
+  mon.clear()
+end
+fitMon()
+
+local function newGrid()
+  local g = {}
+  for y = 1, CH do
+    g[y] = {}
+    for x = 1, CW do g[y][x] = "f" end
+  end
+  return g
+end
+
+local function copyGrid(g)
+  local n = {}
+  for y = 1, CH do
+    n[y] = {}
+    for x = 1, CW do n[y][x] = g[y][x] end
+  end
+  return n
+end
+
+grid = newGrid()
+
+local function push()
+  undo[#undo + 1] = copyGrid(grid)
+  if #undo > 30 then table.remove(undo, 1) end
+end
+
+local function set(x, y, c)
+  if x >= 1 and x <= CW and y >= 1 and y <= CH then
+    grid[y][x] = c
+    modified = true
+  end
+end
+
+local function stamp(x, y, c)
+  local off = math.floor((size - 1) / 2)
+  for dy = 0, size - 1 do
+    for dx = 0, size - 1 do set(x - off + dx, y - off + dy, c) end
+  end
+end
+
+local function line(x0, y0, x1, y1, plot)
+  local dx, dy = math.abs(x1 - x0), math.abs(y1 - y0)
+  local sx, sy = x0 < x1 and 1 or -1, y0 < y1 and 1 or -1
+  local err = dx - dy
+  while true do
+    plot(x0, y0)
+    if x0 == x1 and y0 == y1 then break end
+    local e2 = 2 * err
+    if e2 > -dy then err = err - dy; x0 = x0 + sx end
+    if e2 < dx then err = err + dx; y0 = y0 + sy end
+  end
+end
+
+local function rect(x0, y0, x1, y1, filled, c)
+  local ax, bx = math.min(x0, x1), math.max(x0, x1)
+  local ay, by = math.min(y0, y1), math.max(y0, y1)
+  for y = ay, by do
+    for x = ax, bx do
+      if filled or x == ax or x == bx or y == ay or y == by then set(x, y, c) end
+    end
+  end
+end
+
+local function fill(x, y, c)
+  local target = grid[y][x]
+  if target == c then return end
+  local stack = {{x, y}}
+  while #stack > 0 do
+    local p = table.remove(stack)
+    local px, py = p[1], p[2]
+    if px >= 1 and px <= CW and py >= 1 and py <= CH and grid[py][px] == target then
+      grid[py][px] = c
+      stack[#stack + 1] = {px + 1, py}
+      stack[#stack + 1] = {px - 1, py}
+      stack[#stack + 1] = {px, py + 1}
+      stack[#stack + 1] = {px, py - 1}
+    end
+  end
+  modified = true
+end
+
+-- интерфейс
+local buttons = {}
+local function addButtons(list, row)
+  local x = 1
+  for _, b in ipairs(list) do
+    b.x, b.y, b.w = x, row, #b.label + 2
+    buttons[#buttons + 1] = b
+    x = x + b.w + 1
+  end
+end
+addButtons({
+  {tool = "pen", label = "Pen"}, {tool = "era", label = "Eraser"},
+  {tool = "fill", label = "Fill"}, {tool = "line", label = "Line"},
+  {tool = "rect", label = "Rect"}, {tool = "box", label = "Box"},
+  {tool = "pick", label = "Pick"},
+}, 1)
+addButtons({
+  {act = "undo", label = "Undo"}, {act = "clear", label = "Clear"},
+  {act = "save", label = "Save"}, {act = "load", label = "Load"},
+  {act = "quit", label = "Quit"},
+}, 2)
+
+local spaces = string.rep(" ", CW)
+local fgs = string.rep("0", CW)
+
+local function drawCanvas()
+  for y = 1, CH do
+    term.setCursorPos(1, y + TOP)
+    term.blit(spaces, fgs, table.concat(grid[y]))
+  end
+  -- дублирование на монитор
+  if mon then
+    local cw = math.min(CW, MW)
+    local sp, fg = string.rep(" ", cw), string.rep("0", cw)
+    for y = 1, math.min(CH, MH) do
+      mon.setCursorPos(MX + 1, MY + y)
+      mon.blit(sp, fg, table.concat(grid[y]):sub(1, cw))
+    end
+  end
+end
+
+local function drawUI(cx, cy)
+  term.setBackgroundColor(colors.black)
+  for r = 1, TOP do term.setCursorPos(1, r) term.clearLine() end
+  for _, b in ipairs(buttons) do
+    local on = b.tool and b.tool == tool
+    term.setBackgroundColor(on and colors.white or colors.gray)
+    term.setTextColor(on and colors.black or colors.white)
+    term.setCursorPos(b.x, b.y)
+    write(" " .. b.label .. " ")
+  end
+  term.setBackgroundColor(colors.black)
+  term.setTextColor(msg ~= "" and colors.lime or colors.lightGray)
+  term.setCursorPos(W - 17, 2)
+  if msg ~= "" then
+    write(msg:sub(1, 18))
+  else
+    write(string.format("%s x%d %d,%d", tool, size, cx or 0, cy or 0))
+  end
+  for i = 1, 16 do
+    local ch = HEX:sub(i, i)
+    term.setCursorPos((i - 1) * 2 + 1, 3)
+    term.blit(ch == cur and "><" or "  ", DARK[ch] and "00" or "ff", ch .. ch)
+  end
+  term.setBackgroundColor(colors.black)
+  term.setTextColor(colors.gray)
+  term.setCursorPos(35, 3)
+  write(mon and "Monitor ON " or "RMB = erase")
+end
+
+local function redraw(cx, cy)
+  drawUI(cx, cy)
+  drawCanvas()
+end
+
+local function ask(text)
+  term.setBackgroundColor(colors.black)
+  term.setTextColor(colors.yellow)
+  term.setCursorPos(1, H)
+  term.clearLine()
+  write(text)
+  term.setTextColor(colors.white)
+  return read()
+end
+
+local function yesNo(text)
+  term.setBackgroundColor(colors.black)
+  term.setTextColor(colors.red)
+  term.setCursorPos(1, H)
+  term.clearLine()
+  write(text .. " Y/N")
+  while true do
+    local _, ch = os.pullEvent("char")
+    ch = ch:lower()
+    if ch == "y" then return true end
+    if ch == "n" then return false end
+  end
+end
+
+local function save()
+  local n = ask("Save as: ")
+  if n and n ~= "" and not n:find("[/\\]") then
+    if not fs.exists(DIR) then fs.makeDir(DIR) end
+    local f = fs.open(fs.combine(DIR, n), "w")
+    for y = 1, CH do f.writeLine(table.concat(grid[y])) end
+    f.close()
+    modified = false
+    msg = "Saved"
+  end
+end
+
+local function load()
+  local n = ask("Open file: ")
+  if not n or n == "" then return end
+  local path = fs.exists(n) and n or fs.combine(DIR, n)
+  if fs.exists(path) and not fs.isDir(path) then
+    push()
+    local g = newGrid()
+    local f = fs.open(path, "r")
+    local y = 1
+    while y <= CH do
+      local l = f.readLine()
+      if not l then break end
+      for x = 1, CW do
+        local ch = l:sub(x, x):lower()
+        if ch:match("^[0-9a-f]$") then g[y][x] = ch end
+      end
+      y = y + 1
+    end
+    f.close()
+    grid = g
+    modified = false
+    msg = "Loaded"
+  else
+    msg = "Not found"
+  end
+end
+
+local function applyShape(x1, y1)
+  local d = drag
+  if tool == "line" then
+    line(d.x0, d.y0, x1, y1, function(x, y) stamp(x, y, d.c) end)
+  else
+    rect(d.x0, d.y0, x1, y1, tool == "box", d.c)
+  end
+end
+
+local function clampX(x) return math.max(1, math.min(CW, x)) end
+local function clampY(y) return math.max(1, math.min(CH, y)) end
+
+local function doAction(a)
+  if a == "undo" then
+    if #undo > 0 then grid = table.remove(undo) else msg = "Nothing to undo" end
+  elseif a == "clear" then
+    push() grid = newGrid() modified = false
+  elseif a == "save" then save()
+  elseif a == "load" then load()
+  elseif a == "quit" then
+    if not modified or yesNo("Unsaved! Quit?") then return true end
+  end
+end
+
+local toolKeys = {p = "pen", e = "era", f = "fill", l = "line", r = "rect", b = "box", k = "pick"}
+
+term.setBackgroundColor(colors.black)
+term.clear()
+redraw()
+local running = true
+while running do
+  local e, a, x, y = os.pullEvent()
+  if e == "mouse_click" then
+    msg = ""
+    if y <= TOP then
+      drag = nil
+      if y == 3 then
+        local i = math.floor((x - 1) / 2) + 1
+        if i >= 1 and i <= 16 and a == 1 then
+          cur = HEX:sub(i, i)
+          if tool == "era" or tool == "pick" then tool = "pen" end
+        end
+      else
+        for _, b in ipairs(buttons) do
+          if y == b.y and x >= b.x and x < b.x + b.w then
+            if b.tool then tool = b.tool
+            elseif doAction(b.act) then running = false end
+            break
+          end
+        end
+      end
+      if running then redraw() end
+    else
+      local cx, cy = x, y - TOP
+      local c = (a == 2) and "f" or (tool == "era" and "f" or cur)
+      if tool == "pick" then
+        if a == 1 then cur = grid[cy][cx] tool = "pen" end
+      else
+        push()
+        if tool == "fill" then
+          fill(cx, cy, c)
+        elseif tool == "pen" or tool == "era" then
+          stamp(cx, cy, c)
+          drag = {lx = cx, ly = cy, c = c}
+        else
+          drag = {x0 = cx, y0 = cy, c = c, snap = copyGrid(grid)}
+          applyShape(cx, cy)
+        end
+      end
+      redraw(cx, cy)
+    end
+  elseif e == "mouse_drag" and drag and y > TOP then
+    local cx, cy = clampX(x), clampY(y - TOP)
+    if tool == "pen" or tool == "era" then
+      line(drag.lx, drag.ly, cx, cy, function(px, py) stamp(px, py, drag.c) end)
+      drag.lx, drag.ly = cx, cy
+    else
+      grid = copyGrid(drag.snap)
+      applyShape(cx, cy)
+    end
+    redraw(cx, cy)
+  elseif e == "mouse_up" then
+    drag = nil
+  elseif e == "monitor_touch" then
+    -- касание монитора: рисует текущим цветом (заливка, если выбрана)
+    local cx, cy = x - MX, y - MY
+    if cx >= 1 and cx <= CW and cy >= 1 and cy <= CH then
+      push()
+      local c = (tool == "era") and "f" or cur
+      if tool == "fill" then fill(cx, cy, c)
+      elseif tool == "pick" then cur = grid[cy][cx] tool = "pen"
+      else stamp(cx, cy, c) end
+      redraw(cx, cy)
+    end
+  elseif e == "monitor_resize" then
+    fitMon()
+    redraw()
+  elseif e == "peripheral" or e == "peripheral_detach" then
+    mon = peripheral.find("monitor")
+    fitMon()
+    redraw()
+  elseif e == "char" then
+    local ch = a:lower()
+    msg = ""
+    if toolKeys[ch] then tool = toolKeys[ch]
+    elseif ch == "z" then doAction("undo")
+    elseif ch == "n" then doAction("clear")
+    elseif ch == "s" then doAction("save")
+    elseif ch == "o" then doAction("load")
+    elseif ch == "+" or ch == "=" then size = math.min(5, size + 1)
+    elseif ch == "-" then size = math.max(1, size - 1)
+    elseif ch == "q" then
+      if doAction("quit") then running = false end
+    end
+    if running then redraw() end
+  end
+end
+
+if mon then
+  mon.setBackgroundColor(colors.black)
+  mon.clear()
+end
+term.setBackgroundColor(colors.black)
+term.setTextColor(colors.white)
+term.clear()
+term.setCursorPos(1, 1)

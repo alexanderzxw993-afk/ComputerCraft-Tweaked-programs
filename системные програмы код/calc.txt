@@ -1,0 +1,216 @@
+local W, H = term.getSize()
+local X0, DW = 2, 32          -- левый край и ширина калькулятора
+local BW, BH = 7, 2           -- размер кнопки
+local PX, PY = 8, 3           -- шаг сетки по x и y
+local TOP = 4                 -- первая строка кнопок
+
+local layout = {
+  {"C",   "<", "%", "/"},
+  {"7",   "8", "9", "*"},
+  {"4",   "5", "6", "-"},
+  {"1",   "2", "3", "+"},
+  {"+/-", "0", ".", "="},
+}
+
+local cur, acc, op, fresh, err = "0", nil, nil, true, false
+local buttons = {}
+
+local function fmt(n)
+  n = n + 0
+  if n == math.floor(n) and math.abs(n) < 1e12 then
+    return string.format("%.0f", n)
+  end
+  return string.format("%.10g", n)
+end
+
+local function reset()
+  cur, acc, op, fresh, err = "0", nil, nil, true, false
+end
+
+local function calc(a, o, b)
+  if o == "+" then return a + b
+  elseif o == "-" then return a - b
+  elseif o == "*" then return a * b
+  elseif o == "/" then
+    if b == 0 then return nil end
+    return a / b
+  end
+end
+
+local function btnColors(label)
+  if label == "=" then return colors.lime, colors.black
+  elseif label == "C" then return colors.red, colors.white
+  elseif label:match("^[%+%-%*/]$") then return colors.orange, colors.black
+  elseif label:match("^%d$") or label == "." then return colors.gray, colors.white
+  else return colors.lightGray, colors.black end
+end
+
+for r, row in ipairs(layout) do
+  for c, label in ipairs(row) do
+    local bg, fg = btnColors(label)
+    buttons[#buttons + 1] = {
+      label = label, bg = bg, fg = fg,
+      x = X0 + (c - 1) * PX, y = TOP + (r - 1) * PY,
+    }
+  end
+end
+
+local function drawButton(b, pressed)
+  term.setBackgroundColor(pressed and colors.white or b.bg)
+  term.setTextColor(pressed and colors.black or b.fg)
+  for dy = 0, BH - 1 do
+    term.setCursorPos(b.x, b.y + dy)
+    write(string.rep(" ", BW))
+  end
+  local lx = b.x + math.floor((BW - #b.label) / 2)
+  term.setCursorPos(lx, b.y + math.floor((BH - 1) / 2))
+  write(b.label)
+end
+
+local function drawDisplay()
+  term.setBackgroundColor(colors.gray)
+  for y = 1, 3 do
+    term.setCursorPos(X0, y)
+    write(string.rep(" ", DW))
+  end
+  -- верхняя строка: что уже введено
+  local top = ""
+  if op and acc then top = fmt(acc) .. " " .. op end
+  term.setTextColor(colors.lightGray)
+  term.setCursorPos(X0 + DW - #top - 1, 1)
+  write(top)
+  -- основная строка
+  local text = cur:sub(-(DW - 2))
+  term.setTextColor(err and colors.red or colors.white)
+  term.setCursorPos(X0 + DW - #text - 1, 2)
+  write(text)
+end
+
+local function drawAll()
+  term.setBackgroundColor(colors.black)
+  term.clear()
+  drawDisplay()
+  for _, b in ipairs(buttons) do drawButton(b, false) end
+  if H >= 19 then
+    term.setBackgroundColor(colors.black)
+    term.setTextColor(colors.gray)
+    term.setCursorPos(X0, H)
+    write("Keyboard works too. Q - quit")
+  end
+end
+
+local function setResult(v)
+  if v == nil then
+    cur, acc, op, err, fresh = "Error", nil, nil, true, true
+  else
+    cur = fmt(v)
+  end
+end
+
+local function press(label)
+  if err then reset() end
+
+  if label:match("^%d$") then
+    if fresh then cur = "0"; fresh = false end
+    if cur == "0" then cur = label
+    elseif #cur < 14 then cur = cur .. label end
+
+  elseif label == "." then
+    if fresh then cur = "0"; fresh = false end
+    if not cur:find("%.") then cur = cur .. "." end
+
+  elseif label:match("^[%+%-%*/]$") then
+    if op and not fresh then
+      local r = calc(acc, op, tonumber(cur))
+      if r == nil then setResult(nil) return end
+      acc = r
+      cur = fmt(r)
+    elseif not op then
+      acc = tonumber(cur)
+    end
+    op = label
+    fresh = true
+
+  elseif label == "=" then
+    if op and acc then
+      local r = calc(acc, op, tonumber(cur))
+      acc, op = nil, nil
+      setResult(r)
+      fresh = true
+    end
+
+  elseif label == "%" then
+    setResult(tonumber(cur) / 100)
+    fresh = true
+
+  elseif label == "+/-" then
+    if cur ~= "0" then
+      if cur:sub(1, 1) == "-" then cur = cur:sub(2) else cur = "-" .. cur end
+    end
+
+  elseif label == "<" then
+    if not fresh and #cur > 1 then
+      cur = cur:sub(1, -2)
+      if cur == "-" then cur = "0" end
+    else
+      cur = "0"
+    end
+
+  elseif label == "C" then
+    reset()
+  end
+end
+
+local function find(label)
+  for _, b in ipairs(buttons) do
+    if b.label == label then return b end
+  end
+end
+
+local function flash(label)
+  local b = find(label)
+  if b then
+    drawButton(b, true)
+    sleep(0.1)
+    drawButton(b, false)
+  end
+end
+
+local function act(label)
+  press(label)
+  drawDisplay()
+  flash(label)
+end
+
+drawAll()
+
+while true do
+  local e, a, x, y = os.pullEvent()
+  if e == "mouse_click" and a == 1 then
+    for _, b in ipairs(buttons) do
+      if x >= b.x and x < b.x + BW and y >= b.y and y < b.y + BH then
+        act(b.label)
+        break
+      end
+    end
+  elseif e == "char" then
+    local ch = a:lower()
+    if ch == "q" then break
+    elseif ch:match("^%d$") or ch:match("^[%+%-%*/]$") or ch == "%" or ch == "." then
+      act(ch)
+    elseif ch == "," then act(".")
+    elseif ch == "=" then act("=")
+    elseif ch == "c" then act("C")
+    end
+  elseif e == "key" then
+    if a == keys.enter or a == keys.numPadEnter then act("=")
+    elseif a == keys.backspace then act("<")
+    elseif a == keys.delete then act("C")
+    end
+  end
+end
+
+term.setBackgroundColor(colors.black)
+term.setTextColor(colors.white)
+term.clear()
+term.setCursorPos(1, 1)

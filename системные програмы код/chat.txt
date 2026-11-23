@@ -1,0 +1,311 @@
+local CFG, TZ = "chat.cfg", 3
+local NAMES = {"white","orange","magenta","lightBlue","yellow","lime","pink","gray",
+               "lightGray","cyan","purple","blue","brown","green","red"}
+local valid = {}
+for _, n in ipairs(NAMES) do valid[n] = true end
+local MAXFILE = 65536
+
+-- модемы
+local opened = 0
+for _, side in ipairs(peripheral.getNames()) do
+  if peripheral.getType(side) == "modem" and peripheral.call(side, "isWireless") then
+    rednet.open(side)
+    opened = opened + 1
+  end
+end
+if opened == 0 then
+  print("No wireless modem found.")
+  return
+end
+
+-- настройки
+local cfg = {name = "PC" .. os.getComputerID(), color = "white", room = "main"}
+if fs.exists(CFG) then
+  local f = fs.open(CFG, "r")
+  local t = textutils.unserialize(f.readAll() or "")
+  f.close()
+  if type(t) == "table" then
+    if type(t.name) == "string" then cfg.name = t.name end
+    if valid[t.color] then cfg.color = t.color end
+    if type(t.room) == "string" then cfg.room = t.room end
+  end
+end
+local function save()
+  local f = fs.open(CFG, "w")
+  f.write(textutils.serialize(cfg))
+  f.close()
+end
+
+local function clean(s, n)
+  s = tostring(s or ""):gsub("[%c]", ""):gsub("^%s+", ""):gsub("%s+$", "")
+  return s:sub(1, n)
+end
+
+-- первый запуск: имя, чат, цвет
+if not fs.exists(CFG) then
+  term.clear() term.setCursorPos(1, 1)
+  write("Your name [" .. cfg.name .. "]: ")
+  local n = clean(read(), 20)
+  if n ~= "" then cfg.name = n end
+  write("Chat name [" .. cfg.room .. "]: ")
+  local r = clean(read(), 20)
+  if r ~= "" then cfg.room = r end
+  print("Pick a color:")
+  for i, n2 in ipairs(NAMES) do
+    term.setTextColor(colors[n2])
+    print(i .. ". " .. n2)
+  end
+  term.setTextColor(colors.white)
+  write("Number: ")
+  local c = tonumber(read())
+  if c and NAMES[c] then cfg.color = NAMES[c] end
+  save()
+end
+
+local w, h = term.getSize()
+local entries, pending, hist = {}, {}, {}
+local buf, offset, hpos = "", 0, 0
+
+local function proto() return "chat:" .. cfg.room end
+local function stamp()
+  return os.date("!%H:%M", math.floor(os.epoch("utc") / 1000 + TZ * 3600))
+end
+
+local function addChat(name, col, text)
+  entries[#entries + 1] = {pre = "[" .. stamp() .. "] ", nm = name .. ": ",
+                           col = colors[col] or colors.white, text = text}
+  if #entries > 300 then table.remove(entries, 1) end
+  offset = 0
+end
+local function addSys(text, col)
+  entries[#entries + 1] = {sys = true, text = text, col = col or colors.lightGray}
+  if #entries > 300 then table.remove(entries, 1) end
+  offset = 0
+end
+
+local function wrap(s, width)
+  local out = {}
+  if s == "" then return {""} end
+  while #s > width do
+    out[#out + 1] = s:sub(1, width)
+    s = "  " .. s:sub(width + 1)
+  end
+  out[#out + 1] = s
+  return out
+end
+
+local function build()
+  local lines = {}
+  for _, e in ipairs(entries) do
+    if e.sys then
+      for _, l in ipairs(wrap(e.text, w)) do lines[#lines + 1] = {s = l, col = e.col} end
+    else
+      for i, l in ipairs(wrap(e.pre .. e.nm .. e.text, w)) do
+        lines[#lines + 1] = {s = l, e = (i == 1) and e or nil, col = colors.white}
+      end
+    end
+  end
+  return lines
+end
+
+local function draw()
+  term.setBackgroundColor(colors.black)
+  term.clear()
+  -- шапка
+  term.setCursorPos(1, 1)
+  term.setBackgroundColor(colors.gray)
+  term.setTextColor(colors.white)
+  term.clearLine()
+  local head = " Chat: " .. cfg.room
+  write(head)
+  term.setTextColor(colors[cfg.color])
+  local me = cfg.name .. " "
+  term.setCursorPos(math.max(#head + 2, w - #me + 1), 1)
+  write(me)
+  term.setBackgroundColor(colors.black)
+
+  local rows = h - 2
+  local lines = build()
+  local maxOff = math.max(0, #lines - rows)
+  if offset > maxOff then offset = maxOff end
+  local first = #lines - rows - offset + 1
+  for i = 0, rows - 1 do
+    local l = lines[first + i]
+    if l then
+      term.setCursorPos(1, 2 + i)
+      if l.e then
+        local e = l.e
+        term.setTextColor(colors.gray)
+        write(l.s:sub(1, #e.pre))
+        term.setTextColor(e.col)
+        write(l.s:sub(#e.pre + 1, #e.pre + #e.nm))
+        term.setTextColor(colors.white)
+        write(l.s:sub(#e.pre + #e.nm + 1))
+      else
+        term.setTextColor(l.col)
+        write(l.s)
+      end
+    end
+  end
+  if offset > 0 then
+    term.setCursorPos(w - 8, 2)
+    term.setTextColor(colors.orange)
+    write("[scroll]")
+  end
+  -- ввод
+  term.setCursorPos(1, h - 1)
+  term.setTextColor(colors.gray)
+  write(string.rep("-", w))
+  term.setCursorPos(1, h)
+  term.setTextColor(colors.white)
+  local shown = "> " .. buf
+  if #shown > w - 1 then shown = shown:sub(-(w - 1)) end
+  write(shown)
+  term.setCursorBlink(true)
+end
+
+local function send(t)
+  t.name, t.color = cfg.name, cfg.color
+  rednet.broadcast(t, proto())
+end
+
+local function sanitizeFile(n)
+  n = tostring(n or ""):gsub("[^%w%._%-]", "_"):sub(1, 40)
+  if n == "" or n:match("^%.+$") then n = "file" end
+  return n
+end
+
+local function help()
+  addSys("/name NAME  - change name")
+  addSys("/color [name] - change color (no arg = list)")
+  addSys("/room NAME  - switch chat")
+  addSys("/send PATH  - send file (max 64 KB)")
+  addSys("/accept     - save received file to downloads/")
+  addSys("/who /clear /help /quit")
+  addSys("PgUp/PgDn or mouse wheel: scroll. Up/Down: history")
+end
+
+local function command(line)
+  local cmd, arg = line:match("^/(%S+)%s*(.*)$")
+  arg = clean(arg, 200)
+  if cmd == "quit" then return true
+  elseif cmd == "help" then help()
+  elseif cmd == "clear" then entries = {}
+  elseif cmd == "name" then
+    local n = clean(arg, 20)
+    if n == "" then addSys("Usage: /name NAME", colors.red) else
+      cfg.name = n save() addSys("Name is now " .. n, colors.lime)
+    end
+  elseif cmd == "color" then
+    if arg == "" then
+      for _, n in ipairs(NAMES) do addSys(n, colors[n]) end
+    elseif valid[arg] then
+      cfg.color = arg save() addSys("Color is now " .. arg, colors[arg])
+    else
+      addSys("Unknown color. Type /color to see the list", colors.red)
+    end
+  elseif cmd == "room" then
+    local r = clean(arg, 20)
+    if r == "" then addSys("Usage: /room NAME", colors.red) else
+      cfg.room = r save() entries = {} addSys("Joined chat: " .. r, colors.lime)
+    end
+  elseif cmd == "who" then
+    addSys("Asking who is here...")
+    send({t = "who"})
+  elseif cmd == "send" then
+    if arg == "" or not fs.exists(arg) or fs.isDir(arg) then
+      addSys("File not found: " .. arg, colors.red)
+    elseif fs.getSize(arg) > MAXFILE then
+      addSys("File is too big (max 64 KB)", colors.red)
+    else
+      local f = fs.open(arg, "rb")
+      local data = f.readAll() or ""
+      f.close()
+      send({t = "file", fname = fs.getName(arg), data = data})
+      addSys("Sent " .. fs.getName(arg) .. " (" .. #data .. " B)", colors.lime)
+    end
+  elseif cmd == "accept" then
+    local p = table.remove(pending, 1)
+    if not p then addSys("No files waiting", colors.orange) else
+      if not fs.exists("downloads") then fs.makeDir("downloads") end
+      local base = sanitizeFile(p.fname)
+      local path, n = fs.combine("downloads", base), 1
+      while fs.exists(path) do
+        n = n + 1
+        path = fs.combine("downloads", n .. "_" .. base)
+      end
+      local f = fs.open(path, "wb")
+      f.write(p.data)
+      f.close()
+      addSys("Saved: " .. path, colors.lime)
+    end
+  else
+    addSys("Unknown command. Type /help", colors.red)
+  end
+end
+
+local function receive(id, msg, p)
+  if p ~= proto() or type(msg) ~= "table" then return end
+  local name = clean(msg.name, 20)
+  if name == "" then name = "PC" .. id end
+  local col = valid[msg.color] and msg.color or "white"
+  if msg.t == "msg" and type(msg.text) == "string" then
+    addChat(name, col, clean(msg.text, 200))
+  elseif msg.t == "file" and type(msg.data) == "string" and #msg.data <= MAXFILE then
+    local fname = sanitizeFile(msg.fname)
+    pending[#pending + 1] = {fname = fname, data = msg.data}
+    addSys(name .. " sent file " .. fname .. " (" .. #msg.data .. " B). Type /accept to save",
+           colors.yellow)
+  elseif msg.t == "who" then
+    rednet.send(id, {t = "here", name = cfg.name, color = cfg.color}, proto())
+  elseif msg.t == "here" then
+    addSys(name .. " is here", colors[col])
+  end
+end
+
+addSys("Welcome! Type /help for commands", colors.lightBlue)
+draw()
+
+while true do
+  local e, a, b, c = os.pullEvent()
+  if e == "char" then
+    if #buf < 200 then buf = buf .. a end
+  elseif e == "paste" then
+    buf = (buf .. a:gsub("[%c]", "")):sub(1, 200)
+  elseif e == "key" then
+    if a == keys.enter or a == keys.numPadEnter then
+      local line = clean(buf, 200)
+      buf, hpos = "", 0
+      if line ~= "" then
+        hist[#hist + 1] = line
+        if line:sub(1, 1) == "/" then
+          if command(line) then break end
+        else
+          send({t = "msg", text = line})
+          addChat(cfg.name, cfg.color, line)
+        end
+      end
+    elseif a == keys.backspace then buf = buf:sub(1, -2)
+    elseif a == keys.pageUp then offset = offset + (h - 4)
+    elseif a == keys.pageDown then offset = math.max(0, offset - (h - 4))
+    elseif a == keys.up then
+      if #hist > 0 then hpos = math.min(#hist, hpos + 1) buf = hist[#hist - hpos + 1] end
+    elseif a == keys.down then
+      if hpos > 1 then hpos = hpos - 1 buf = hist[#hist - hpos + 1]
+      else hpos = 0 buf = "" end
+    end
+  elseif e == "mouse_scroll" then
+    offset = math.max(0, offset - a * 2)
+  elseif e == "rednet_message" then
+    receive(a, b, c)
+  elseif e == "term_resize" then
+    w, h = term.getSize()
+  end
+  draw()
+end
+
+term.setCursorBlink(false)
+term.setBackgroundColor(colors.black)
+term.setTextColor(colors.white)
+term.clear()
+term.setCursorPos(1, 1)

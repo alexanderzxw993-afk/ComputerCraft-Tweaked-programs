@@ -1,0 +1,281 @@
+local w, h = term.getSize()
+local MUSIC = "music"
+if not fs.exists(MUSIC) then fs.makeDir(MUSIC) end
+
+local speaker = peripheral.find("speaker")
+local okD, dfpwm = pcall(require, "cc.audio.dfpwm")
+
+local INSTS = {"harp", "bell", "flute", "chime", "guitar", "xylophone", "pling", "bit", "banjo"}
+
+-- Мелодии: "нота:длительность в долях", R - пауза. Например C4:1 G4:2
+local songs = {
+  {name = "Twinkle Twinkle", bpm = 120, notes =
+    "C4 C4 G4 G4 A4 A4 G4:2 F4 F4 E4 E4 D4 D4 C4:2 " ..
+    "G4 G4 F4 F4 E4 E4 D4:2 G4 G4 F4 F4 E4 E4 D4:2 " ..
+    "C4 C4 G4 G4 A4 A4 G4:2 F4 F4 E4 E4 D4 D4 C4:2"},
+  {name = "Ode to Joy", bpm = 120, notes =
+    "E4 E4 F4 G4 G4 F4 E4 D4 C4 C4 D4 E4 E4:1.5 D4:0.5 D4:2 " ..
+    "E4 E4 F4 G4 G4 F4 E4 D4 C4 C4 D4 E4 D4:1.5 C4:0.5 C4:2"},
+  {name = "Fur Elise", bpm = 140, notes =
+    "E5:.5 D#5:.5 E5:.5 D#5:.5 E5:.5 B4:.5 D5:.5 C5:.5 A4:1.5 R:.5 " ..
+    "C4:.5 E4:.5 A4:.5 B4:1.5 R:.5 E4:.5 G#4:.5 B4:.5 C5:1.5 R:.5 " ..
+    "E4:.5 E5:.5 D#5:.5 E5:.5 D#5:.5 E5:.5 B4:.5 D5:.5 C5:.5 A4:1.5"},
+  {name = "Jingle Bells", bpm = 150, notes =
+    "E4 E4 E4:2 E4 E4 E4:2 E4 G4 C4:1.5 D4:.5 E4:4 " ..
+    "F4 F4 F4:1.5 F4:.5 F4 E4 E4 E4:.5 E4:.5 E4 D4 D4 E4 D4:2 G4:2"},
+}
+
+local SEMI = {C = 0, D = 2, E = 4, F = 5, G = 7, A = 9, B = 11}
+
+local function toPitch(name)
+  local l, acc, oct = name:match("^([A-G])([#b]?)(%d)$")
+  if not l then return nil end
+  local midi = 12 * (tonumber(oct) + 1) + SEMI[l] + (acc == "#" and 1 or acc == "b" and -1 or 0)
+  local p = midi - 54          -- колонка: 0 = F#3, 24 = F#5
+  while p < 0 do p = p + 12 end
+  while p > 24 do p = p - 12 end
+  return p
+end
+
+local function parse(str)
+  local list = {}
+  for tok in str:gmatch("%S+") do
+    local name, dur = tok:match("^([^:]+):?([%d%.]*)$")
+    if name then
+      list[#list + 1] = {
+        pitch = (name ~= "R") and toPitch(name) or nil,
+        dur = tonumber(dur) or 1,
+      }
+    end
+  end
+  return list
+end
+
+-- состояние
+local items, sel, top = {}, 1, 1
+local vol, bpm, inst, loop, paused = 1.5, 120, 1, false, false
+local progress = ""
+
+local function getDrive()
+  return peripheral.find("drive")
+end
+
+local function scan()
+  local list = {}
+  for _, s in ipairs(songs) do
+    list[#list + 1] = {kind = "song", name = s.name, song = s}
+  end
+  local d = getDrive()
+  if d and d.isDiskPresent() and d.hasAudio() then
+    list[#list + 1] = {kind = "disc", name = "Disc: " .. (d.getAudioTitle() or "unknown")}
+  end
+  local files = {}
+  for _, f in ipairs(fs.list(MUSIC)) do
+    if f:match("%.dfpwm$") then files[#files + 1] = f end
+  end
+  table.sort(files, function(a, b) return a:lower() < b:lower() end)
+  for _, f in ipairs(files) do
+    list[#list + 1] = {kind = "file", name = f:gsub("%.dfpwm$", ""), path = fs.combine(MUSIC, f)}
+  end
+  return list
+end
+
+local function refresh()
+  items = scan()
+  if sel > #items then sel = math.max(1, #items) end
+end
+
+local function tag(it)
+  if it.kind == "song" then return "[melody]"
+  elseif it.kind == "disc" then return "[disc]"
+  else return "[file]" end
+end
+
+local function drawMenu()
+  term.setBackgroundColor(colors.black)
+  term.clear()
+  term.setTextColor(colors.yellow)
+  term.setCursorPos(1, 1)
+  write("MUSIC PLAYER (" .. #items .. ")")
+  if not speaker then
+    term.setTextColor(colors.red)
+    term.setCursorPos(1, 2)
+    write("No speaker: place one next to the computer")
+  end
+  local rows = h - 4
+  if sel < top then top = sel end
+  if sel > top + rows - 1 then top = sel - rows + 1 end
+  for i = 0, rows - 1 do
+    local it = items[top + i]
+    if it then
+      local on = (top + i == sel)
+      term.setCursorPos(1, 3 + i)
+      term.setBackgroundColor(on and colors.white or colors.black)
+      term.clearLine()
+      term.setTextColor(on and colors.black or colors.white)
+      write(" " .. it.name:sub(1, w - 12))
+      term.setTextColor(on and colors.gray or colors.lightGray)
+      term.setCursorPos(w - #tag(it), 3 + i)
+      write(tag(it))
+    end
+  end
+  term.setBackgroundColor(colors.black)
+  term.setTextColor(colors.gray)
+  term.setCursorPos(1, h)
+  write("ENTER play  R rescan  Q quit")
+end
+
+local function bar(v)
+  return string.rep("#", math.floor(v * 2)) .. string.rep("-", 6 - math.floor(v * 2))
+end
+
+local function drawPlay(it)
+  term.setBackgroundColor(colors.black)
+  term.clear()
+  term.setTextColor(colors.yellow)
+  term.setCursorPos(1, 1)
+  write("NOW PLAYING")
+  term.setTextColor(colors.white)
+  term.setCursorPos(1, 3)
+  write(it.name:sub(1, w))
+  term.setTextColor(paused and colors.orange or colors.lime)
+  term.setCursorPos(1, 4)
+  write(paused and "PAUSED" or "Playing  " .. progress)
+  term.setTextColor(colors.lightGray)
+  term.setCursorPos(1, 6)
+  write("Volume [" .. bar(vol) .. "]  +/-")
+  if it.kind == "song" then
+    term.setCursorPos(1, 7)
+    write("Tempo  " .. bpm .. " bpm  Left/Right")
+    term.setCursorPos(1, 8)
+    write("Sound  " .. INSTS[inst] .. "  I")
+    term.setCursorPos(1, 9)
+    write("Loop   " .. (loop and "on" or "off") .. "  L")
+  end
+  term.setTextColor(colors.gray)
+  term.setCursorPos(1, h)
+  write("SPACE pause  S stop")
+end
+
+local function playSong(it)
+  local notes = parse(it.song.notes)
+  repeat
+    for i, n in ipairs(notes) do
+      while paused do sleep(0.1) end
+      if n.pitch and speaker then
+        speaker.playNote(INSTS[inst], vol, n.pitch)
+      end
+      progress = i .. "/" .. #notes
+      sleep(n.dur * 60 / bpm)
+    end
+  until not loop
+end
+
+local function playFile(it)
+  if not speaker then return end
+  if not okD then
+    progress = "no dfpwm library"
+    sleep(2)
+    return
+  end
+  local decoder = dfpwm.make_decoder()
+  repeat
+    local f = fs.open(it.path, "rb")
+    while true do
+      while paused do sleep(0.1) end
+      local chunk = f.read(16 * 1024)
+      if not chunk then break end
+      local buffer = decoder(chunk)
+      while not speaker.playAudio(buffer, vol) do
+        os.pullEvent("speaker_audio_empty")
+      end
+    end
+    f.close()
+  until not loop
+end
+
+local function playDisc()
+  local d = getDrive()
+  if d then d.playAudio() end
+  while true do sleep(1) end
+end
+
+local function keys_(it)
+  while true do
+    local e, a = os.pullEvent()
+    if e == "key" then
+      if a == keys.space then
+        paused = not paused
+        if it.kind == "disc" then
+          local d = getDrive()
+          if d then
+            if paused then d.stopAudio() else d.playAudio() end
+          end
+        elseif paused and speaker then
+          speaker.stop()
+        end
+      elseif a == keys.s or a == keys.q or a == keys.backspace then return
+      elseif a == keys.left then bpm = math.max(40, bpm - 10)
+      elseif a == keys.right then bpm = math.min(300, bpm + 10)
+      elseif a == keys.i then inst = inst % #INSTS + 1
+      elseif a == keys.l then loop = not loop end
+    elseif e == "char" then
+      if a == "+" or a == "=" then vol = math.min(3, vol + 0.5)
+      elseif a == "-" then vol = math.max(0.5, vol - 0.5) end
+    end
+    drawPlay(it)
+  end
+end
+
+local function play(it)
+  paused, progress = false, ""
+  if it.kind == "song" then bpm = it.song.bpm end
+  drawPlay(it)
+
+  local player
+  if it.kind == "song" then player = function() playSong(it) end
+  elseif it.kind == "file" then player = function() playFile(it) end
+  else player = playDisc end
+
+  -- обновляем экран раз в секунду, пока играет
+  local ticker = function()
+    while true do sleep(1) drawPlay(it) end
+  end
+
+  parallel.waitForAny(player, function() keys_(it) end, ticker)
+
+  if speaker then speaker.stop() end
+  if it.kind == "disc" then
+    local d = getDrive()
+    if d then d.stopAudio() end
+  end
+end
+
+refresh()
+while true do
+  drawMenu()
+  local e, a, b, c = os.pullEvent()
+  if e == "key" then
+    if a == keys.up and sel > 1 then sel = sel - 1
+    elseif a == keys.down and sel < #items then sel = sel + 1
+    elseif a == keys.enter and items[sel] then play(items[sel]) refresh()
+    elseif a == keys.r then refresh()
+    elseif a == keys.q then break end
+  elseif e == "mouse_click" then
+    local idx = top + (c - 3)
+    if c >= 3 and items[idx] then
+      sel = idx
+      play(items[idx])
+      refresh()
+    end
+  elseif e == "mouse_scroll" then
+    sel = math.max(1, math.min(math.max(1, #items), sel + a))
+  elseif e == "disk" or e == "disk_eject" then
+    refresh()
+  end
+end
+
+term.setBackgroundColor(colors.black)
+term.setTextColor(colors.white)
+term.clear()
+term.setCursorPos(1, 1)

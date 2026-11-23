@@ -1,0 +1,127 @@
+local W, H = term.getSize()
+local TW = 2                                   -- ширина клетки в символах
+local maxCw = math.floor((math.floor(W / TW) - 1) / 2)
+local maxCh = math.floor((H - 3) / 2)
+
+local level = 1
+local grid, gw, gh, ox, oy
+local px, py, ex, ey
+local secs, steps, timer = 0, 0, nil
+
+math.randomseed(os.epoch("utc"))
+
+local function generate(cw, ch)
+  gw, gh = 2 * cw + 1, 2 * ch + 1
+  grid = {}
+  for y = 1, gh do
+    grid[y] = {}
+    for x = 1, gw do grid[y][x] = true end     -- true = стена
+  end
+  -- обход в глубину (recursive backtracker), без рекурсии
+  local stack = {{2, 2}}
+  grid[2][2] = false
+  while #stack > 0 do
+    local cur = stack[#stack]
+    local opts = {}
+    for _, d in ipairs({{2, 0}, {-2, 0}, {0, 2}, {0, -2}}) do
+      local nx, ny = cur[1] + d[1], cur[2] + d[2]
+      if nx >= 2 and nx <= gw - 1 and ny >= 2 and ny <= gh - 1 and grid[ny][nx] then
+        opts[#opts + 1] = {nx, ny, cur[1] + d[1] / 2, cur[2] + d[2] / 2}
+      end
+    end
+    if #opts == 0 then
+      table.remove(stack)
+    else
+      local o = opts[math.random(#opts)]
+      grid[o[4]][o[3]] = false
+      grid[o[2]][o[1]] = false
+      stack[#stack + 1] = {o[1], o[2]}
+    end
+  end
+  px, py = 2, 2
+  ex, ey = gw - 1, gh - 1
+end
+
+local function drawTile(x, y)
+  local bg
+  if x == px and y == py then bg = "4"         -- игрок: жёлтый
+  elseif x == ex and y == ey then bg = "5"     -- выход: зелёный
+  elseif grid[y][x] then bg = "7"              -- стена: серый
+  else bg = "f" end                            -- проход: чёрный
+  term.setCursorPos(ox + (x - 1) * TW, oy + y - 1)
+  term.blit(string.rep(" ", TW), string.rep("0", TW), string.rep(bg, TW))
+end
+
+local function drawHeader()
+  term.setBackgroundColor(colors.black)
+  term.setTextColor(colors.yellow)
+  term.setCursorPos(1, 1)
+  term.clearLine()
+  write("Level " .. level .. "  Time " .. secs .. "  Steps " .. steps .. "  R new Q quit")
+end
+
+local function drawAll()
+  term.setBackgroundColor(colors.black)
+  term.clear()
+  drawHeader()
+  for y = 1, gh do
+    for x = 1, gw do drawTile(x, y) end
+  end
+end
+
+local function newLevel()
+  local cw = math.min(maxCw, 4 + level)
+  local ch = math.min(maxCh, 3 + level)
+  generate(cw, ch)
+  ox = math.floor((W - gw * TW) / 2) + 1
+  oy = 2
+  secs, steps = 0, 0
+  timer = os.startTimer(1)
+  drawAll()
+end
+
+local function move(dx, dy)
+  local nx, ny = px + dx, py + dy
+  if grid[ny] and grid[ny][nx] == false then
+    local ox_, oy_ = px, py
+    px, py = nx, ny
+    steps = steps + 1
+    drawTile(ox_, oy_)
+    drawTile(px, py)
+    drawHeader()
+    if px == ex and py == ey then
+      term.setBackgroundColor(colors.black)
+      term.setTextColor(colors.lime)
+      term.setCursorPos(1, H)
+      term.clearLine()
+      write("Done in " .. secs .. " s, " .. steps .. " steps!")
+      sleep(1.5)
+      level = level + 1
+      newLevel()
+    end
+  end
+end
+
+newLevel()
+
+while true do
+  local e, a = os.pullEvent()
+  if e == "key" then
+    if a == keys.q then break
+    elseif a == keys.r then newLevel()
+    elseif a == keys.up or a == keys.w then move(0, -1)
+    elseif a == keys.down or a == keys.s then move(0, 1)
+    elseif a == keys.left or a == keys.a then move(-1, 0)
+    elseif a == keys.right or a == keys.d then move(1, 0)
+    end
+  elseif e == "timer" and a == timer then
+    secs = secs + 1
+    drawHeader()
+    timer = os.startTimer(1)
+  end
+end
+
+term.setBackgroundColor(colors.black)
+term.setTextColor(colors.white)
+term.clear()
+term.setCursorPos(1, 1)

@@ -1,0 +1,139 @@
+local w, h = term.getSize()
+
+-- что не показывать в меню
+local HIDE = {menu = true, startup = true}
+-- расширения файлов, которые не являются программами
+local EXTRA = {"worm", "adventure"}
+if term.isColor() then
+  EXTRA[#EXTRA + 1] = "paint"
+  EXTRA[#EXTRA + 1] = "redirection"
+end
+
+local items, sel, top = {}, 1, 1
+
+local function scan()
+  local list, seen = {}, {}
+
+  local function addFrom(dir)
+    if dir ~= "" and not fs.isDir(dir) then return end
+    for _, f in ipairs(fs.list(dir)) do
+      local path = fs.combine(dir, f)
+      if not fs.isDir(path) then
+        local base, ext = f:match("^(.*)%.([^.]+)$")
+        if not base then base = f end
+        -- берём файлы .lua и файлы без расширения
+        if (ext == nil or ext == "lua") and not HIDE[base] and not seen[base] then
+          seen[base] = true
+          list[#list + 1] = {name = base, path = path}
+        end
+      end
+    end
+  end
+
+  addFrom("")       -- файлы в корне
+  addFrom("games")  -- и папка games, если она есть
+
+  -- встроенные программы ComputerCraft
+  for _, n in ipairs(EXTRA) do
+    if not seen[n] and shell.resolveProgram(n) then
+      seen[n] = true
+      list[#list + 1] = {name = n, path = n}
+    end
+  end
+
+  table.sort(list, function(a, b) return a.name:lower() < b.name:lower() end)
+  return list
+end
+
+local function refresh()
+  local current = items[sel] and items[sel].name
+  items = scan()
+  sel = 1
+  for i, it in ipairs(items) do
+    if it.name == current then sel = i break end
+  end
+end
+
+local function draw()
+  term.setBackgroundColor(colors.black)
+  term.clear()
+  term.setTextColor(colors.yellow)
+  term.setCursorPos(1, 1)
+  write("GAME MENU  (" .. #items .. ")")
+
+  local rows = h - 3
+  if sel < top then top = sel end
+  if sel > top + rows - 1 then top = sel - rows + 1 end
+
+  if #items == 0 then
+    term.setTextColor(colors.lightGray)
+    term.setCursorPos(2, 3)
+    write("No programs found")
+  end
+
+  for i = 0, rows - 1 do
+    local it = items[top + i]
+    if it then
+      term.setCursorPos(1, 3 + i)
+      if top + i == sel then
+        term.setBackgroundColor(colors.white)
+        term.setTextColor(colors.black)
+      else
+        term.setBackgroundColor(colors.black)
+        term.setTextColor(colors.white)
+      end
+      term.clearLine()
+      write(" " .. it.name)
+    end
+  end
+
+  term.setBackgroundColor(colors.black)
+  term.setTextColor(colors.gray)
+  term.setCursorPos(1, h)
+  write("Up/Down  ENTER run  R rescan  Q quit")
+end
+
+local function run(it)
+  term.setBackgroundColor(colors.black)
+  term.setTextColor(colors.white)
+  term.clear()
+  term.setCursorPos(1, 1)
+  local ok = shell.run(it.path)
+  if not ok then
+    term.setTextColor(colors.red)
+    print()
+    print("Program stopped with an error.")
+    term.setTextColor(colors.lightGray)
+    print("Press any key...")
+    os.pullEvent("key")
+  end
+  refresh()
+end
+
+refresh()
+while true do
+  draw()
+  local e, a, b, c = os.pullEvent()
+  if e == "key" then
+    if a == keys.up and sel > 1 then sel = sel - 1
+    elseif a == keys.down and sel < #items then sel = sel + 1
+    elseif a == keys.home then sel = 1
+    elseif a == keys["end"] then sel = math.max(1, #items)
+    elseif a == keys.enter and items[sel] then run(items[sel])
+    elseif a == keys.r then refresh()
+    elseif a == keys.q then break end
+  elseif e == "mouse_click" then
+    local idx = top + (c - 3)
+    if c >= 3 and items[idx] then
+      sel = idx
+      run(items[idx])
+    end
+  elseif e == "mouse_scroll" then
+    sel = math.max(1, math.min(#items, sel + a))
+  end
+end
+
+term.setBackgroundColor(colors.black)
+term.setTextColor(colors.white)
+term.clear()
+term.setCursorPos(1, 1)

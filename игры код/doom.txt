@@ -1,0 +1,108 @@
+local W, H = term.getSize()
+local FOV = math.pi / 3
+
+local map = {
+  "############",
+  "#..#.......#",
+  "#..#.#####.#",
+  "#....#...#.#",
+  "####.#.#.#.#",
+  "#....#.#...#",
+  "#.####.#####",
+  "#......#...#",
+  "#.######.#.#",
+  "#........#E#",
+  "#.######...#",
+  "############",
+}
+
+local px, py, a = 2.5, 2.5, 0
+local centerHit, centerDist = ".", 99
+
+local function cell(x, y)
+  return map[math.floor(y) + 1]:sub(math.floor(x) + 1, math.floor(x) + 1)
+end
+
+-- цвета стен по расстоянию: {ближе, средне, далеко}, для двух сторон
+local shade = {
+  [0] = {"e", "c", "7"},
+  [1] = {"1", "c", "7"},
+}
+
+local function render()
+  local top, bot, col = {}, {}, {}
+  for x = 1, W do
+    local ra = a + (x / W - 0.5) * FOV
+    local dx, dy = math.cos(ra), math.sin(ra)
+    local mx, my = math.floor(px), math.floor(py)
+    local ddx, ddy = math.abs(1 / dx), math.abs(1 / dy)
+    local sx, sdx, sy, sdy
+    if dx < 0 then sx = -1; sdx = (px - mx) * ddx else sx = 1; sdx = (mx + 1 - px) * ddx end
+    if dy < 0 then sy = -1; sdy = (py - my) * ddy else sy = 1; sdy = (my + 1 - py) * ddy end
+    local side, c
+    while true do
+      if sdx < sdy then sdx = sdx + ddx; mx = mx + sx; side = 0
+      else sdy = sdy + ddy; my = my + sy; side = 1 end
+      c = map[my + 1]:sub(mx + 1, mx + 1)
+      if c ~= "." then break end
+    end
+    local dist = (side == 0 and sdx - ddx or sdy - ddy) * math.cos(ra - a)
+    dist = math.max(dist, 0.1)
+    local lh = H / dist
+    top[x] = math.floor(H / 2 - lh / 2)
+    bot[x] = math.floor(H / 2 + lh / 2)
+    if c == "E" then
+      col[x] = "d"
+    else
+      col[x] = shade[side][dist < 2.5 and 1 or dist < 5 and 2 or 3]
+    end
+    if x == math.floor(W / 2) then centerHit, centerDist = c, dist end
+  end
+
+  for y = 1, H do
+    local row = {}
+    for x = 1, W do
+      if y < top[x] then row[x] = "b"        -- потолок
+      elseif y > bot[x] then row[x] = "7"    -- пол
+      else row[x] = col[x] end
+    end
+    term.setCursorPos(1, y)
+    term.blit(string.rep(" ", W), string.rep("0", W), table.concat(row))
+  end
+  term.setBackgroundColor(colors.black)
+  term.setTextColor(colors.white)
+  term.setCursorPos(1, 1)
+  write("WASD/arrows  Q quit  Find the green exit")
+end
+
+local function tryMove(nx, ny)
+  if cell(nx, py) == "." then px = nx end
+  if cell(px, ny) == "." then py = ny end
+end
+
+local SPEED, TURN = 0.2, 0.12
+render()
+while true do
+  local _, k = os.pullEvent("key")
+  if k == keys.q then break
+  elseif k == keys.up or k == keys.w then tryMove(px + math.cos(a) * SPEED, py + math.sin(a) * SPEED)
+  elseif k == keys.down or k == keys.s then tryMove(px - math.cos(a) * SPEED, py - math.sin(a) * SPEED)
+  elseif k == keys.a then tryMove(px + math.sin(a) * SPEED, py - math.cos(a) * SPEED)
+  elseif k == keys.d then tryMove(px - math.sin(a) * SPEED, py + math.cos(a) * SPEED)
+  elseif k == keys.left then a = a - TURN
+  elseif k == keys.right then a = a + TURN end
+  render()
+  if centerHit == "E" and centerDist < 1.2 then
+    term.setBackgroundColor(colors.black)
+    term.setTextColor(colors.lime)
+    term.setCursorPos(math.floor(W / 2) - 5, math.floor(H / 2))
+    write(" YOU WIN! ")
+    sleep(2)
+    break
+  end
+end
+
+term.setBackgroundColor(colors.black)
+term.setTextColor(colors.white)
+term.clear()
+term.setCursorPos(1, 1)

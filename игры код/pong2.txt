@@ -1,0 +1,180 @@
+local w, h = term.getSize()
+local PH = 4          -- высота ракетки
+local WIN = 5         -- очков до победы
+local TICK = 0.05
+local SPEED = 0.7     -- скорость ракеток
+local top = 2
+
+local p1, p2          -- верхние клетки ракеток (красная, синяя)
+local bx, by, vx, vy  -- мяч
+local s1, s2 = 0, 0   -- счёт
+local down = {}       -- зажатые клавиши
+
+local function clamp(v, lo, hi)
+  return math.max(lo, math.min(hi, v))
+end
+
+local function serve(dir)
+  bx, by = w / 2, (top + h) / 2
+  vx = 0.45 * dir
+  vy = (math.random() - 0.5) * 0.5
+end
+
+local function draw()
+  term.setBackgroundColor(colors.black)
+  term.clear()
+
+  -- счёт
+  term.setTextColor(colors.red)
+  term.setCursorPos(1, 1)
+  write("RED " .. s1)
+  term.setTextColor(colors.blue)
+  local s = "BLUE " .. s2
+  term.setCursorPos(w - #s + 1, 1)
+  write(s)
+
+  -- центральная линия
+  term.setTextColor(colors.gray)
+  for y = top, h, 2 do
+    term.setCursorPos(math.floor(w / 2), y)
+    write("|")
+  end
+
+  -- ракетки
+  for i = 0, PH - 1 do
+    term.setBackgroundColor(colors.red)
+    term.setCursorPos(2, math.floor(p1 + 0.5) + i)
+    write(" ")
+    term.setBackgroundColor(colors.blue)
+    term.setCursorPos(w - 1, math.floor(p2 + 0.5) + i)
+    write(" ")
+  end
+
+  -- мяч
+  term.setBackgroundColor(colors.white)
+  term.setCursorPos(clamp(math.floor(bx + 0.5), 1, w), clamp(math.floor(by + 0.5), top, h))
+  write(" ")
+  term.setBackgroundColor(colors.black)
+end
+
+local function bounce(padY, dir)
+  local hit = (by - (padY + PH / 2 - 0.5)) / (PH / 2)
+  vx = clamp(math.abs(vx) * 1.06, 0.45, 1.0) * dir
+  vy = clamp(hit * 0.6, -0.7, 0.7)
+end
+
+local function round()
+  s1, s2 = 0, 0
+  down = {}
+  p1 = math.floor((top + h - PH) / 2)
+  p2 = p1
+  serve(math.random(2) == 1 and 1 or -1)
+  draw()
+  sleep(1)
+
+  local timer = os.startTimer(TICK)
+  local paused = false
+
+  while s1 < WIN and s2 < WIN do
+    local e, a = os.pullEvent()
+    if e == "key" then
+      if a == keys.q then return false end
+      if a == keys.p then
+        paused = not paused
+        if paused then
+          term.setBackgroundColor(colors.black)
+          term.setTextColor(colors.white)
+          term.setCursorPos(math.floor(w / 2) - 2, math.floor(h / 2))
+          write("PAUSE")
+        end
+      end
+      down[a] = true
+    elseif e == "key_up" then
+      down[a] = false
+    elseif e == "timer" and a == timer then
+      timer = os.startTimer(TICK)
+      if not paused then
+        -- ракетки
+        if down[keys.w] then p1 = p1 - SPEED end
+        if down[keys.s] then p1 = p1 + SPEED end
+        if down[keys.up] then p2 = p2 - SPEED end
+        if down[keys.down] then p2 = p2 + SPEED end
+        p1 = clamp(p1, top, h - PH + 1)
+        p2 = clamp(p2, top, h - PH + 1)
+
+        -- мяч
+        bx, by = bx + vx, by + vy
+        if by < top then by = top; vy = -vy end
+        if by > h then by = h; vy = -vy end
+
+        -- красная ракетка (слева)
+        if vx < 0 and bx <= 3 then
+          local py = math.floor(p1 + 0.5)
+          if by >= py - 0.5 and by <= py + PH - 0.5 then
+            bx = 3
+            bounce(py, 1)
+          elseif bx < 1 then
+            s2 = s2 + 1
+            serve(1)
+            draw()
+            sleep(0.8)
+            down = {}
+            timer = os.startTimer(TICK)
+          end
+        end
+
+        -- синяя ракетка (справа)
+        if vx > 0 and bx >= w - 2 then
+          local py = math.floor(p2 + 0.5)
+          if by >= py - 0.5 and by <= py + PH - 0.5 then
+            bx = w - 2
+            bounce(py, -1)
+          elseif bx > w then
+            s1 = s1 + 1
+            serve(-1)
+            draw()
+            sleep(0.8)
+            down = {}
+            timer = os.startTimer(TICK)
+          end
+        end
+
+        draw()
+      end
+    end
+  end
+  return true
+end
+
+math.randomseed(os.epoch("utc"))
+
+while true do
+  if not round() then break end
+  term.setBackgroundColor(colors.black)
+  term.clear()
+  term.setCursorPos(2, 3)
+  if s1 >= WIN then
+    term.setTextColor(colors.red)
+    write("RED WINS!")
+  else
+    term.setTextColor(colors.blue)
+    write("BLUE WINS!")
+  end
+  term.setTextColor(colors.white)
+  term.setCursorPos(2, 5)
+  write("Score: " .. s1 .. " : " .. s2)
+  term.setCursorPos(2, 7)
+  write("ENTER - again, Q - quit")
+  local again
+  while true do
+    local _, k = os.pullEvent("key")
+    if k == keys.enter then again = true break end
+    if k == keys.q then again = false break end
+  end
+  if not again then break end
+end
+
+term.setBackgroundColor(colors.black)
+term.setTextColor(colors.white)
+term.clear()
+term.setCursorPos(1, 1)

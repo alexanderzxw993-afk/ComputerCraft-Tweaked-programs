@@ -1,0 +1,90 @@
+local recordFile = "clicker.record"
+local ROUND = 10  -- длительность раунда в секундах
+local w, h = term.getSize()
+
+local function loadRecord()
+  if fs.exists(recordFile) then
+    local f = fs.open(recordFile, "r")
+    local n = tonumber(f.readAll())
+    f.close()
+    return n or 0
+  end
+  return 0
+end
+
+local function saveRecord(n)
+  local f = fs.open(recordFile, "w")
+  f.write(tostring(n))
+  f.close()
+end
+
+local function center(y, text, c)
+  if term.isColor() then term.setTextColor(c or colors.white) end
+  term.setCursorPos(math.max(1, math.floor((w - #text) / 2) + 1), y)
+  write(text)
+end
+
+local function play()
+  local record = loadRecord()
+  local score, timeLeft = 0, ROUND
+  local started, timer = false, nil
+
+  local function draw()
+    term.setBackgroundColor(colors.black)
+    term.clear()
+    center(1, "CLICKER", colors.yellow)
+    center(3, "Score: " .. score, colors.white)
+    center(4, "Record: " .. record, colors.orange)
+    if started then
+      center(6, "Time: " .. timeLeft, colors.lime)
+    else
+      center(6, "Click or press SPACE to start", colors.lightGray)
+    end
+    center(h, "Q - quit", colors.gray)
+  end
+
+  draw()
+  while true do
+    local e, a = os.pullEvent()
+    if e == "mouse_click" or (e == "key" and a == keys.space) then
+      if not started then
+        started = true
+        timer = os.startTimer(1)
+      end
+      score = score + 1
+      draw()
+    elseif e == "timer" and a == timer then
+      timeLeft = timeLeft - 1
+      if timeLeft <= 0 then break end
+      timer = os.startTimer(1)
+      draw()
+    elseif e == "key" and a == keys.q then
+      return false
+    end
+  end
+
+  -- конец раунда
+  term.clear()
+  center(2, "TIME IS UP!", colors.red)
+  center(4, "Your score: " .. score, colors.white)
+  if score > record then
+    saveRecord(score)
+    center(6, "NEW RECORD!", colors.yellow)
+  else
+    center(6, "Record: " .. record, colors.orange)
+  end
+  center(8, "ENTER - again, Q - quit", colors.lightGray)
+
+  while true do
+    local e, k = os.pullEvent("key")
+    if k == keys.enter then return true end
+    if k == keys.q then return false end
+  end
+end
+
+while play() do end
+
+term.setBackgroundColor(colors.black)
+term.setTextColor(colors.white)
+term.clear()
+term.setCursorPos(1, 1)
