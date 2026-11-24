@@ -1,0 +1,882 @@
+if not term.isColor() then
+  print("Doom needs an Advanced Computer (colors).")
+  return
+end
+local mirrorOff
+do
+  local mon = peripheral.find("monitor")
+  if mon and mon.isColor() then
+    local main = term.current()
+    local W0, H0 = main.getSize()
+    -- самый крупный масштаб, при котором экран компьютера помещается на монитор
+    for _, s in ipairs({5, 4, 3, 2, 1.5, 1, 0.5}) do
+      mon.setTextScale(s)
+      local mw, mh = mon.getSize()
+      if mw >= W0 and mh >= H0 then break end
+    end
+    local mw, mh = mon.getSize()
+    local ox = math.max(0, math.floor((mw - W0) / 2))
+    local oy = math.max(0, math.floor((mh - H0) / 2))
+    mon.setBackgroundColor(colors.black)
+    mon.clear()
+
+    local m = {}
+    for k, f in pairs(main) do m[k] = f end
+    local cy = 1
+
+    local both = {"setTextColor", "setTextColour", "setBackgroundColor", "setBackgroundColour",
+                  "setCursorBlink", "write", "blit"}
+    for _, name in ipairs(both) do
+      m[name] = function(...)
+        if mon[name] then mon[name](...) end
+        return main[name](...)
+      end
+    end
+    m.setCursorPos = function(x, y)
+      cy = y
+      mon.setCursorPos(x + ox, y + oy)
+      return main.setCursorPos(x, y)
+    end
+    m.clear = function()
+      mon.clear()
+      return main.clear()
+    end
+    m.clearLine = function()
+      local cx = main.getCursorPos()
+      mon.setCursorPos(ox + 1, cy + oy)
+      mon.write(string.rep(" ", W0))
+      mon.setCursorPos(cx + ox, cy + oy)
+      return main.clearLine()
+    end
+    term.redirect(m)
+
+    mirrorOff = function()
+      term.redirect(main)
+      mon.setBackgroundColor(colors.black)
+      mon.clear()
+    end
+  end
+end
+local W, H = term.getSize()
+local VH = H - 3                      -- 3 нижние строки под панель
+local PL, TICK, MOVE, TURN, PR = 0.9, 0.05, 0.11, 0.07, 0.25
+local floor, ceil, sqrt, abs = math.floor, math.ceil, math.sqrt, math.abs
+local sin, cos, random = math.sin, math.cos, math.random
+local max, min = math.max, math.min
+local atan2 = math.atan2 or function(y, x) return math.atan(y, x) end
+local concat = table.concat
+
+-- # серый кирпич, R красный кирпич, T техно, E выход (жёлтая стена)
+-- P старт, Z зомби, I имп, B барон
+-- h аптечка, s патроны к дробовику, b пули, S дробовик, C пулемёт
+local levels = {
+  {name = "Hangar", map = {
+    "####################",
+    "#P...#.....#...h...#",
+    "#........Z.......Z.#",
+    "#....#.....#.......#",
+    "####.####.######.###",
+    "#..................#",
+    "#.S..###..###..b...#",
+    "#....#I#..#I#......#",
+    "#....#.#..#.#..Z...#",
+    "#..................#",
+    "#.....h..........E.#",
+    "####################",
+  }},
+  {name = "Warehouse", map = {
+    "######################",
+    "#P....R.......#......#",
+    "#.....R...Z...#...I..#",
+    "#.....R.......#......#",
+    "#.....R...##.....b...#",
+    "#..Z......##.........#",
+    "#.......s............#",
+    "#....RRRR....RRRR....#",
+    "#..I...............Z.#",
+    "#....C...............#",
+    "#...Z.........I....hE#",
+    "######################",
+  }},
+  {name = "Baron's Lair", map = {
+    "####################",
+    "#P......#..........#",
+    "#.......#...I...Z..#",
+    "#..s....#..........#",
+    "#..................#",
+    "#....TT......TT....#",
+    "#....TT..h...TT.Z..#",
+    "#..................#",
+    "#.b......I.........#",
+    "#......TTTTTT......#",
+    "#..h...........B..E#",
+    "####################",
+  }},
+}
+
+-- цвета стен: ближе, средне, далеко
+local ramp = {
+  ["#"] = {"8", "7", "f"},
+  R = {"e", "c", "f"},
+  T = {"3", "b", "f"},
+  E = {"4", "1", "f"},
+}
+local FLOORC = "d"                    -- цвет пола (зелёный), не совпадает со стенами
+
+local ETYPES = {
+  Z = {name = "Zombie", hp = 4, speed = 0.04, r = 0.3, hit = 0.38, melee = true, dmg = 7,
+       scale = 0.8, w = 0.55,
+       fig = {head = "d", body = "c", limb = "d", legs = "7", belt = "f", eye = "e"}},
+  I = {name = "Imp", hp = 5, speed = 0.03, r = 0.3, hit = 0.38, range = 11, dmg = 9, cd = 40,
+       scale = 0.85, w = 0.6,
+       fig = {head = "c", body = "1", limb = "c", legs = "c", belt = "e", eye = "4"}},
+  B = {name = "Baron", hp = 24, speed = 0.025, r = 0.45, hit = 0.55, range = 12, dmg = 11, cd = 30,
+       triple = true, scale = 1.0, w = 0.85,
+       fig = {head = "e", body = "e", limb = "e", legs = "c", belt = "4", eye = "4", horns = true}},
+}
+
+local ITEM = {
+  h = {scale = 0.3, w = 0.4, paint = function(u, v)
+    if abs(u - 0.5) < 0.14 or abs(v - 0.5) < 0.14 then return "e" end
+    return "0"
+  end},
+  s = {scale = 0.25, w = 0.4, paint = function(u, v)
+    if v < 0.35 then return "4" end
+    return (u < 0.5) and "e" or "c"
+  end},
+  b = {scale = 0.22, w = 0.4, paint = function(u, v)
+    if v < 0.3 then return "4" end
+    return "c"
+  end},
+  S = {scale = 0.25, w = 0.55, paint = function(u, v)
+    if v < 0.3 or v > 0.7 then return nil end
+    return (u < 0.3) and "c" or "8"
+  end},
+  C = {scale = 0.28, w = 0.55, paint = function(u, v)
+    if v < 0.2 or v > 0.8 then return nil end
+    return "8"
+  end},
+}
+
+local WEAPONS = {
+  {name = "Pistol", delay = 7, pellets = 1, spread = 0.02, dmg = 2, art = {
+    "....f....",
+    "...878...",
+    "...878...",
+    "..87778..",
+    "..77777..",
+    ".7777777.",
+  }},
+  {name = "Shotgun", ammo = "shells", delay = 16, pellets = 7, spread = 0.12, dmg = 1, art = {
+    "......8......",
+    ".....878.....",
+    ".....878.....",
+    ".....777.....",
+    "....77777....",
+    "...c777777c..",
+    "..ccc7777ccc.",
+  }},
+  {name = "Chaingun", ammo = "bullets", delay = 3, pellets = 1, spread = 0.05, dmg = 2, art = {
+    "....8.8.8....",
+    "....7.7.7....",
+    "...7777777...",
+    "..777888777..",
+    "..777777777..",
+    ".77777777777.",
+  }},
+}
+
+local map, enemies, items, shots, exits = {}, {}, {}, {}, {}
+local px, py, ang, dx, dy = 2, 2, 0.6, 1, 0
+local hp, ammo, owned, weapon = 100, {shells = 0, bullets = 0}, {true, false, false}, 1
+local cooldown, flash, hurtT, msgText, msgT = 0, 0, 0, "", 0
+local kills, totalE, lvlNo = 0, 0, 1
+local down, shotQ, paused, showMap = {}, false, false, false
+local moving, bobT, tick = false, 0, 0
+
+local function say(t) msgText, msgT = t, 45 end
+
+local function resetPlayer()
+  hp = 100
+  ammo = {shells = 0, bullets = 0}
+  owned = {true, false, false}
+  weapon = 1
+end
+
+local function cellAt(x, y)
+  local row = map[floor(y) + 1]
+  if not row then return "#" end
+  local c = row:sub(floor(x) + 1, floor(x) + 1)
+  if c == "" then return "#" end
+  return c
+end
+
+local function isWall(c) return ramp[c] ~= nil end
+
+local function loadLevel(n)
+  lvlNo = n
+  map, enemies, items, shots, exits = {}, {}, {}, {}, {}
+  for y, row in ipairs(levels[n].map) do
+    for x = 1, #row do
+      local c = row:sub(x, x)
+      local cx, cy = x - 0.5, y - 0.5
+      if c == "P" then px, py = cx, cy
+      elseif ETYPES[c] then
+        local t = ETYPES[c]
+        enemies[#enemies + 1] = {t = t, x = cx, y = cy, hp = t.hp, cool = 0, hurt = 0,
+                                 awake = false, sdir = 1, sflip = 20}
+      elseif ITEM[c] then items[#items + 1] = {kind = c, x = cx, y = cy}
+      elseif c == "E" then exits[#exits + 1] = {x = cx, y = cy} end
+    end
+    map[y] = (row:gsub("[PZIBsbhSC]", "."))
+  end
+  totalE, kills = #enemies, 0
+  ang = 0.6
+  dx, dy = cos(ang), sin(ang)
+end
+
+-- луч: расстояние, сторона, тип стены, позиция по ширине стены (0..1)
+local function castRay(ox, oy, rdx, rdy)
+  local mx, my = floor(ox), floor(oy)
+  local ddx = (rdx == 0) and 1e30 or abs(1 / rdx)
+  local ddy = (rdy == 0) and 1e30 or abs(1 / rdy)
+  local sx, sy, sdx, sdy
+  if rdx < 0 then sx = -1; sdx = (ox - mx) * ddx else sx = 1; sdx = (mx + 1 - ox) * ddx end
+  if rdy < 0 then sy = -1; sdy = (oy - my) * ddy else sy = 1; sdy = (my + 1 - oy) * ddy end
+  local side, c
+  for _ = 1, 64 do
+    if sdx < sdy then sdx = sdx + ddx; mx = mx + sx; side = 0
+    else sdy = sdy + ddy; my = my + sy; side = 1 end
+    c = cellAt(mx + 0.5, my + 0.5)
+    if ramp[c] then
+      local dist = (side == 0) and (sdx - ddx) or (sdy - ddy)
+      local wx
+      if side == 0 then wx = oy + dist * rdy else wx = ox + dist * rdx end
+      return dist, side, c, wx - floor(wx)
+    end
+  end
+  return 64, 0, "#", 0
+end
+
+-- кирпичная кладка: ровные цвета, шов на ступень темнее; вдали шов не рисуется (нет шума)
+local function wallColor(c, side, dist, wx, v)
+  local s = dist / 9 + (side == 1 and 0.2 or 0)
+  local idx = (s < 0.3) and 1 or (s < 0.65) and 2 or 3
+  local r = ramp[c]
+  if dist < 6 and idx < 3 then
+    if c == "#" or c == "R" then
+      local rows = (c == "R") and 4 or 3
+      local bv = v * rows
+      local row = floor(bv)
+      local u = wx * 2 + (row % 2) * 0.5
+      if bv - row < 0.12 or (u - floor(u)) < 0.07 then return r[idx + 1] end
+    elseif c == "T" then
+      if v > 0.45 and v < 0.55 then return "9" end
+    end
+  end
+  return r[idx]
+end
+
+-- потолок чёрный, пол зелёный
+local BASE, CAMX, zbuf = {}, {}, {}
+for y = 1, VH do
+  local row = {}
+  local col = ((y - 0.5) < VH / 2) and "f" or FLOORC
+  for x = 1, W do row[x] = col end
+  BASE[y] = row
+end
+for x = 1, W do CAMX[x] = 2 * (x - 0.5) / W - 1 end
+
+local BG, FG, CH = {}, {}, {}
+for y = 1, VH do BG[y], FG[y], CH[y] = {}, {}, {} end
+
+-- СПРАЙТЫ
+local function paintFigure(d, u, v)
+  if v < 0.3 then
+    if d.horns and v < 0.16 and ((u > 0.22 and u <= 0.3) or (u >= 0.7 and u < 0.78)) then return "0" end
+    if u < 0.3 or u > 0.7 then return nil end
+    if v > 0.1 and v < 0.2 and (abs(u - 0.4) < 0.06 or abs(u - 0.6) < 0.06) then return d.eye end
+    return d.head
+  elseif v < 0.72 then
+    if u < 0.12 or u > 0.88 then return nil end
+    if u < 0.24 or u > 0.76 then return d.limb end
+    if v > 0.45 and v < 0.52 then return d.belt end
+    return d.body
+  else
+    if (u > 0.25 and u < 0.45) or (u > 0.55 and u < 0.75) then return d.legs end
+    return nil
+  end
+end
+
+local function paintEnemy(e, u, v)
+  local c = paintFigure(e.t.fig, u, v)
+  if c and e.hurt > 0 then return "0" end
+  return c
+end
+
+local function paintCorpse(e, u, v)
+  if u < 0.08 or u > 0.92 then return nil end
+  return "e"
+end
+
+local function paintItem(it, u, v) return ITEM[it.kind].paint(u, v) end
+
+local function paintShot(s, u, v)
+  local r2 = (u - 0.5) ^ 2 + (v - 0.5) ^ 2
+  if r2 < 0.06 then return "4" end
+  if r2 < 0.2 then return "1" end
+  return nil
+end
+
+local function drawSprite(sp)
+  local depth = sp.d
+  if depth < 0.25 then return end
+  local rx, ry = sp.x - px, sp.y - py
+  local side = rx * (-dy) + ry * dx
+  local scrX = (side / (depth * PL) + 1) / 2 * W
+  local fullH = VH / depth
+  local sh = fullH * sp.scale
+  local sw = W / (2 * PL * depth) * sp.w
+  local bottom = VH / 2 + fullH / 2 - sp.lift * fullH
+  local topY = bottom - sh
+  local xa = floor(scrX - sw / 2) + 1
+  local xb = floor(scrX + sw / 2)
+  if xb < xa then xb = xa end
+  if xb < 1 or xa > W then return end
+  local y0 = max(1, ceil(topY + 0.5))
+  local y1 = min(VH, floor(bottom + 0.5))
+  local span = xb - xa + 1
+  for x = max(1, xa), min(W, xb) do
+    if depth < zbuf[x] then
+      local u = (x - xa + 0.5) / span
+      for y = y0, y1 do
+        local c = sp.paint(sp.o, u, (y - 0.5 - topY) / sh)
+        if c then BG[y][x] = c end
+      end
+    end
+  end
+end
+
+-- ЛОГИКА (вспомогательное)
+local function blocked(x, y, r)
+  return isWall(cellAt(x - r, y - r)) or isWall(cellAt(x + r, y - r))
+      or isWall(cellAt(x - r, y + r)) or isWall(cellAt(x + r, y + r))
+end
+
+local function los(x0, y0, x1, y1)
+  local ddx, ddy = x1 - x0, y1 - y0
+  local n = floor(sqrt(ddx * ddx + ddy * ddy) / 0.15)
+  for i = 1, n do
+    local t = i / n
+    if isWall(cellAt(x0 + ddx * t, y0 + ddy * t)) then return false end
+  end
+  return true
+end
+
+-- ближайший живой враг, который видит тебя или идёт на тебя
+local function nearestEnemy()
+  local best, bd = nil, 1e9
+  for _, e in ipairs(enemies) do
+    if e.hp > 0 then
+      local d = sqrt((e.x - px) ^ 2 + (e.y - py) ^ 2)
+      if d < bd and d < 9 and (e.awake or los(e.x, e.y, px, py)) then best, bd = e, d end
+    end
+  end
+  return best, bd
+end
+
+-- ИНФО-ПАНЕЛЬ (3 строки): мигает красным, когда враг рядом
+local function hud()
+  local en, ed = nearestEnemy()
+  local bg
+  if en then bg = (floor(tick / 4) % 2 == 0) and colors.red or colors.brown  else bg = colors.gray end
+  term.setBackgroundColor(bg)
+  for r = 0, 2 do
+    term.setCursorPos(1, VH + 1 + r)
+    term.clearLine()
+  end
+
+  -- строка 1: здоровье и оружие
+  term.setCursorPos(1, VH + 1)
+  term.setTextColor(colors.white)
+  write(" HP ")
+  local bars = floor(max(0, hp) / 10 + 0.5)
+  term.setTextColor(hp > 50 and colors.lime or hp > 25 and colors.yellow or colors.black)
+  if en and hp <= 25 then term.setTextColor(colors.yellow) end
+  write(string.rep("|", bars))
+  term.setTextColor(colors.lightGray)
+  write(string.rep(".", 10 - bars))
+  term.setTextColor(colors.white)
+  write(" " .. max(0, hp))
+  local wp = WEAPONS[weapon]
+  term.setTextColor(colors.yellow)
+  write("  " .. wp.name .. " " .. (wp.ammo and ammo[wp.ammo] or "inf"))
+
+  -- строка 2: враг, убийства, уровень
+  term.setCursorPos(1, VH + 2)
+  if en then
+    term.setTextColor(colors.white)
+    write(" ! " .. en.t.name .. " " .. floor(ed + 0.5) .. "m ")
+  else
+    term.setTextColor(colors.lime)
+    write(" Clear ")
+  end
+  term.setTextColor(colors.orange)
+  write(" Kills " .. kills .. "/" .. totalE)
+  term.setTextColor(colors.cyan)
+  write(" L" .. lvlNo)
+
+  -- строка 3: подсказка
+  term.setCursorPos(1, VH + 3)
+  term.setTextColor(colors.lightGray)
+  write((" 1-3 gun  M map  P pause  Q quit"):sub(1, W))
+end
+
+local function put(x, y, c)
+  local r = BG[y]
+  if r and x >= 1 and x <= W then r[x] = c end
+end
+
+local function render()
+  local planeX, planeY = -dy * PL, dx * PL
+
+  for y = 1, VH do
+    local b, f, c, base = BG[y], FG[y], CH[y], BASE[y]
+    for x = 1, W do b[x] = base[x]; f[x] = "0"; c[x] = " " end
+  end
+
+  for x = 1, W do
+    local cx = CAMX[x]
+    local dist, side, c, wx = castRay(px, py, dx + planeX * cx, dy + planeY * cx)
+    if dist < 0.05 then dist = 0.05 end
+    zbuf[x] = dist
+    local lh = VH / dist
+    local top = VH / 2 - lh / 2
+    local y0 = max(1, ceil(top + 0.5))
+    local y1 = min(VH, floor(VH / 2 + lh / 2 + 0.5))
+    for y = y0, y1 do
+      BG[y][x] = wallColor(c, side, dist, wx, (y - 0.5 - top) / lh)
+    end
+  end
+
+  local list = {}
+  for _, e in ipairs(enemies) do
+    if e.hp > 0 then
+      list[#list + 1] = {x = e.x, y = e.y, scale = e.t.scale, w = e.t.w, lift = 0, paint = paintEnemy, o = e}
+    else
+      list[#list + 1] = {x = e.x, y = e.y, scale = 0.12, w = e.t.w + 0.2, lift = 0, paint = paintCorpse, o = e}
+    end
+  end
+  for _, it in ipairs(items) do
+    local d = ITEM[it.kind]
+    list[#list + 1] = {x = it.x, y = it.y, scale = d.scale, w = d.w, lift = 0, paint = paintItem, o = it}
+  end
+  for _, s in ipairs(shots) do
+    list[#list + 1] = {x = s.x, y = s.y, scale = 0.22, w = 0.28, lift = 0.4, paint = paintShot, o = s}
+  end
+  for _, sp in ipairs(list) do sp.d = (sp.x - px) * dx + (sp.y - py) * dy end
+  table.sort(list, function(a, b) return a.d > b.d end)
+  for _, sp in ipairs(list) do drawSprite(sp) end
+
+  local wp = WEAPONS[weapon]
+  local art = wp.art
+  local aw, ah = #art[1], #art
+  local ox = floor((W - aw) / 2) + 1
+  local oy = (cooldown > wp.delay - 2) and 1 or 0
+  if moving then
+    ox = ox + floor(sin(bobT * 0.25) * 2 + 0.5)
+    oy = oy + floor(abs(sin(bobT * 0.25)) * 1.5)
+  end
+  for r = 1, ah do
+    local yy = VH - ah + r + oy
+    if yy >= 1 and yy <= VH then
+      local row = art[r]
+      for c = 1, aw do
+        local ch = row:sub(c, c)
+        if ch ~= "." then put(ox + c - 1, yy, ch) end
+      end
+    end
+  end
+  if flash > 0 then
+    local fx = floor(W / 2) + 1
+    local ty = VH - ah + 1 + oy
+    put(fx - 1, ty - 1, "1") put(fx, ty - 1, "4") put(fx + 1, ty - 1, "1")
+    put(fx, ty - 2, "4")
+  end
+
+  CH[floor(VH / 2)][floor(W / 2) + 1] = "+"
+  FG[floor(VH / 2)][floor(W / 2) + 1] = "0"
+
+  if hurtT > 0 then
+    for y = 1, VH do put(1, y, "e") put(W, y, "e") end
+  end
+
+  if msgT > 0 then
+    local t = " " .. msgText .. " "
+    local x0 = floor((W - #t) / 2) + 1
+    for i = 1, #t do
+      local x = x0 + i - 1
+      if x >= 1 and x <= W then
+        BG[1][x], FG[1][x], CH[1][x] = "f", "4", t:sub(i, i)
+      end
+    end
+  end
+
+  if showMap then
+    for my = 1, min(#map, VH) do
+      local row = map[my]
+      for mx = 1, min(#row, W) do
+        local c = row:sub(mx, mx)
+        BG[my][mx] = ramp[c] and ramp[c][1] or "f"
+        FG[my][mx], CH[my][mx] = "0", " "
+      end
+    end
+    for _, ex in ipairs(exits) do put(floor(ex.x) + 1, floor(ex.y) + 1, "5") end
+    for _, it in ipairs(items) do put(floor(it.x) + 1, floor(it.y) + 1, "9") end
+    for _, e in ipairs(enemies) do
+      if e.hp > 0 then put(floor(e.x) + 1, floor(e.y) + 1, "e") end
+    end
+    local mx, my = floor(px) + 1, floor(py) + 1
+    put(mx, my, "4")
+    if BG[my] and mx >= 1 and mx <= W then
+      local a = ang % (2 * math.pi)
+      local idx = floor(a / (math.pi / 2) + 0.5) % 4 + 1
+      CH[my][mx] = (">v<^"):sub(idx, idx)
+      FG[my][mx] = "f"
+    end
+  end
+
+  for y = 1, VH do
+    term.setCursorPos(1, y)
+    term.blit(concat(CH[y]), concat(FG[y]), concat(BG[y]))
+  end
+  hud()
+end
+
+local function enemyNear(x, y)
+  for _, e in ipairs(enemies) do
+    if e.hp > 0 then
+      local rr = e.t.r + PR
+      if (x - e.x) ^ 2 + (y - e.y) ^ 2 < rr * rr then return true end
+    end
+  end
+  return false
+end
+
+local function tryMove(nx, ny)
+  if not blocked(nx, py, PR) and not enemyNear(nx, py) then px = nx end
+  if not blocked(px, ny, PR) and not enemyNear(px, ny) then py = ny end
+end
+
+local function hurtPlayer(n)
+  hp = hp - n
+  hurtT = 8
+end
+
+local function canStand(x, y, e)
+  if blocked(x, y, e.r) then return false end
+  local rr = e.r + PR
+  if (x - px) ^ 2 + (y - py) ^ 2 < rr * rr then return false end
+  for _, o in ipairs(enemies) do
+    if o ~= e and o.hp > 0 then
+      local r2 = e.r + o.t.r
+      if (x - o.x) ^ 2 + (y - o.y) ^ 2 < r2 * r2 then return false end
+    end
+  end
+  return true
+end
+
+local function moveEnemy(e, ux, uy, spd)
+  local nx, ny = e.x + ux * spd, e.y + uy * spd
+  local saved = e.r
+  e.r = e.t.r
+  if canStand(nx, e.y, e) then e.x = nx end
+  if canStand(e.x, ny, e) then e.y = ny end
+  e.r = saved
+end
+
+local function spawnShot(e, off)
+  local a = atan2(py - e.y, px - e.x) + off
+  shots[#shots + 1] = {x = e.x, y = e.y, vx = cos(a) * 0.16, vy = sin(a) * 0.16,
+                       dmg = e.t.dmg, life = 120}
+end
+
+local function hitscan(a, dmg)
+  local hx, hy = cos(a), sin(a)
+  local wd = castRay(px, py, hx, hy)
+  local best, bd = nil, wd
+  for _, e in ipairs(enemies) do
+    if e.hp > 0 then
+      local rx, ry = e.x - px, e.y - py
+      local along = rx * hx + ry * hy
+      if along > 0.1 and along < bd and abs(rx * hy - ry * hx) < e.t.hit then
+        best, bd = e, along
+      end
+    end
+  end
+  if best then
+    best.hp = best.hp - dmg
+    best.hurt = 3
+    best.awake = true
+    if best.hp <= 0 then kills = kills + 1 end
+  end
+end
+
+local function fire()
+  if cooldown > 0 then return end
+  local wp = WEAPONS[weapon]
+  if wp.ammo then
+    if ammo[wp.ammo] <= 0 then
+      say("Out of ammo!")
+      weapon = 1
+      cooldown = 6
+      return
+    end
+    ammo[wp.ammo] = ammo[wp.ammo] - 1
+  end
+  cooldown = wp.delay
+  flash = 3
+  for _ = 1, wp.pellets do
+    hitscan(ang + (random() - 0.5) * 2 * wp.spread, wp.dmg)
+  end
+end
+
+local function pickup(it)
+  local k = it.kind
+  if k == "h" then
+    if hp >= 100 then return false end
+    hp = min(100, hp + 25) say("Medkit +25 HP")
+  elseif k == "s" then
+    ammo.shells = min(40, ammo.shells + 8) say("Shells +8")
+  elseif k == "b" then
+    ammo.bullets = min(200, ammo.bullets + 25) say("Bullets +25")
+  elseif k == "S" then
+    owned[2] = true ammo.shells = min(40, ammo.shells + 8) weapon = 2 say("Shotgun! (key 2)")
+  elseif k == "C" then
+    owned[3] = true ammo.bullets = min(200, ammo.bullets + 40) weapon = 3 say("Chaingun! (key 3)")
+  end
+  return true
+end
+
+local function updateEnemies()
+  for _, e in ipairs(enemies) do
+    if e.hp > 0 then
+      local t = e.t
+      if e.hurt > 0 then e.hurt = e.hurt - 1 end
+      if e.cool > 0 then e.cool = e.cool - 1 end
+      local rx, ry = px - e.x, py - e.y
+      local dist = max(0.001, sqrt(rx * rx + ry * ry))
+      local ux, uy = rx / dist, ry / dist
+      local seen = dist < 14 and los(e.x, e.y, px, py)
+      if not e.awake then
+        if seen and dist < 10 then e.awake = true e.cool = 12 + random(10) end
+      elseif t.melee then
+        if dist > 0.9 then moveEnemy(e, ux, uy, t.speed)
+        elseif e.cool <= 0 then hurtPlayer(t.dmg) e.cool = 16 end
+      else
+        if seen and e.cool <= 0 and dist < t.range then
+          if t.triple then
+            for i = -1, 1 do spawnShot(e, i * 0.22) end
+          else
+            spawnShot(e, (random() - 0.5) * 0.1)
+          end
+          e.cool = t.cd + random(15)
+        end
+        if not seen or dist > 5 then
+          moveEnemy(e, ux, uy, t.speed)
+        elseif dist < 2.2 then
+          moveEnemy(e, -ux, -uy, t.speed * 0.7)
+        else
+          e.sflip = e.sflip - 1
+          if e.sflip <= 0 then e.sdir = -e.sdir e.sflip = 20 + random(30) end
+          moveEnemy(e, -uy * e.sdir, ux * e.sdir, t.speed * 0.6)
+        end
+      end
+    end
+  end
+end
+
+local function update()
+  tick = tick + 1
+  if cooldown > 0 then cooldown = cooldown - 1 end
+  if flash > 0 then flash = flash - 1 end
+  if hurtT > 0 then hurtT = hurtT - 1 end
+  if msgT > 0 then msgT = msgT - 1 end
+
+  if down[keys.left] then ang = ang - TURN end
+  if down[keys.right] then ang = ang + TURN end
+  dx, dy = cos(ang), sin(ang)
+
+  local mx, my = 0, 0
+  if down[keys.w] or down[keys.up] then mx, my = mx + dx, my + dy end
+  if down[keys.s] or down[keys.down] then mx, my = mx - dx, my - dy end
+  if down[keys.a] then mx, my = mx + dy, my - dx end
+  if down[keys.d] then mx, my = mx - dy, my + dx end
+  local len = sqrt(mx * mx + my * my)
+  moving = len > 0
+  if moving then
+    bobT = bobT + 1
+    tryMove(px + mx / len * MOVE, py + my / len * MOVE)
+  end
+
+  if down[keys.space] or shotQ then fire() end
+  shotQ = false
+
+  for i = #items, 1, -1 do
+    local it = items[i]
+    if (it.x - px) ^ 2 + (it.y - py) ^ 2 < 0.36 and pickup(it) then
+      table.remove(items, i)
+    end
+  end
+
+  updateEnemies()
+
+  for i = #shots, 1, -1 do
+    local s = shots[i]
+    s.x, s.y, s.life = s.x + s.vx, s.y + s.vy, s.life - 1
+    local dead = s.life <= 0 or isWall(cellAt(s.x, s.y))
+    if not dead and (s.x - px) ^ 2 + (s.y - py) ^ 2 < 0.09 then
+      hurtPlayer(s.dmg)
+      dead = true
+    end
+    if dead then table.remove(shots, i) end
+  end
+
+  if hp <= 0 then return "dead" end
+  for _, ex in ipairs(exits) do
+    if (px - ex.x) ^ 2 + (py - ex.y) ^ 2 < 1.21 then return "next" end
+  end
+end
+
+-- ЭКРАНЫ И ГЛАВНЫЙ ЦИКЛ
+local function screen(lines)
+  term.setBackgroundColor(colors.black)
+  term.setCursorBlink(false)
+  term.clear()
+  local y = max(1, floor((H - #lines) / 2))
+  for i, l in ipairs(lines) do
+    term.setTextColor(l[2] or colors.white)
+    term.setCursorPos(max(1, floor((W - #l[1]) / 2) + 1), y + i - 1)
+    write(l[1])
+  end
+end
+
+local function waitKey(list)
+  sleep(0.4)
+  while true do
+    local _, k = os.pullEvent("key")
+    if not list or list[k] then return k end
+  end
+end
+
+local function play()
+  down, shotQ, paused = {}, false, false
+  cooldown, flash, hurtT, msgT, tick = 0, 0, 0, 0, 0
+  say("Level " .. lvlNo .. ": " .. levels[lvlNo].name)
+  render()
+  local timer = os.startTimer(TICK)
+  while true do
+    local ev, a, b = os.pullEvent()
+    if ev == "timer" and a == timer then
+      if not paused then
+        local r = update()
+        if r then return r end
+        render()
+      end
+      timer = os.startTimer(TICK)
+    elseif ev == "key" then
+      down[a] = true
+      if not b then
+        if a == keys.q then return "quit"
+        elseif a == keys.one or a == keys.two or a == keys.three then
+          local n = (a == keys.one) and 1 or (a == keys.two) and 2 or 3
+          if owned[n] then weapon = n cooldown = max(cooldown, 4) else say("You don't have it yet") end
+        elseif a == keys.m or a == keys.tab then showMap = not showMap
+        elseif a == keys.p then
+          paused = not paused
+          if paused then
+            term.setBackgroundColor(colors.black)
+            term.setTextColor(colors.white)
+            term.setCursorPos(floor(W / 2) - 3, floor(VH / 2))
+            write(" PAUSED ")
+          end
+        end
+      end
+    elseif ev == "key_up" then
+      down[a] = nil
+    elseif ev == "mouse_click" and a == 1 then
+      shotQ = true
+    end
+  end
+end
+
+math.randomseed(os.epoch("utc"))
+term.setCursorBlink(false)
+
+screen({
+  {"D O O M   C C", colors.red},
+  {"Reach the yellow exit wall. Enemies block the way!", colors.yellow},
+  {""},
+  {"W S / Up Down   move       A D   strafe", colors.white},
+  {"Left Right      turn       Space / click   fire", colors.white},
+  {"1 2 3  weapons             M  map      P  pause", colors.white},
+  {"Q  quit", colors.white},
+  {""},
+  {"The bottom panel flashes red when an enemy is near.", colors.orange},
+  {""},
+  {"Press any key", colors.gray},
+})
+waitKey()
+
+resetPlayer()
+local n = 1
+while true do
+  local snap = {hp = hp, shells = ammo.shells, bullets = ammo.bullets,
+                o = {owned[1], owned[2], owned[3]}, w = weapon}
+  loadLevel(n)
+  local res = play()
+  if res == "quit" then break
+  elseif res == "next" then
+    if n >= #levels then
+      screen({
+        {"YOU WIN!", colors.lime},
+        {"All levels cleared."},
+        {""},
+        {"Enter - play again    Q - quit", colors.gray},
+      })
+      local k = waitKey({[keys.enter] = true, [keys.q] = true})
+      if k == keys.q then break end
+      resetPlayer()
+      n = 1
+    else
+      screen({
+        {"LEVEL " .. n .. " COMPLETE", colors.lime},
+        {"Kills: " .. kills .. " / " .. totalE},
+        {"+25 HP bonus", colors.cyan},
+        {""},
+        {"Press any key", colors.gray},
+      })
+      waitKey()
+      hp = min(100, hp + 25)
+      n = n + 1
+    end
+  elseif res == "dead" then
+    screen({
+      {"YOU DIED", colors.red},
+      {"Kills: " .. kills .. " / " .. totalE},
+      {""},
+      {"Enter - retry level    Q - quit", colors.gray},
+    })
+    local k = waitKey({[keys.enter] = true, [keys.q] = true})
+    if k == keys.q then break end
+    hp = max(snap.hp, 60)
+    ammo = {shells = snap.shells, bullets = snap.bullets}
+    owned = {snap.o[1], snap.o[2], snap.o[3]}
+    weapon = snap.w
+  end
+end
+if mirrorOff then mirrorOff() end
+term.setBackgroundColor(colors.black)
+term.setTextColor(colors.white)
+term.clear()
+term.setCursorPos(1, 1)
